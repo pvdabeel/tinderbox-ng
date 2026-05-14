@@ -1,5 +1,5 @@
 #!/bin/bash
-# tinderbox-ng.d/compare-matrix.sh
+# share/tinderbox-ng/compare-matrix.sh
 #
 # Drive `tinderbox-ng compare` over a list of packages, parse each
 # summary table, and emit a single-line TSV record per target plus a

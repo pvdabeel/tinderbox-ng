@@ -1,31 +1,44 @@
 # tinderbox-ng
 
 Gentoo build-testing rig with overlayfs sessions. Builds an **immutable
-baseline** (latest stage3 + SWI-Prolog + portage-ng + matching `kb.qlf`)
-and exposes it as the lower layer of an overlayfs-backed `chroot`. Each
-experiment runs in its own session whose writes land in an upper layer
-that can be discarded with one command.
+baseline** (latest stage3 + SWI-Prolog + [portage-ng](https://github.com/pvdabeel/portage-ng)
++ matching `kb.qlf`) and exposes it as the lower layer of an overlayfs-backed
+`chroot`. Each experiment runs in its own session whose writes land in an
+upper layer that can be discarded with one command.
 
 The host OS root is never touched: the baseline lives entirely under
 `$TINDERBOX_ROOT` (default `/srv/tinderbox-ng`), the Portage tree binds
 in read-only, and host-side caches like `/var/db/pkg` are not mounted in.
 
+`tinderbox-ng` was extracted from the
+[`portage-ng`](https://github.com/pvdabeel/portage-ng) repository at
+commit `26069d06` and now lives standalone. The
+[Compatibility with portage-ng](#compatibility-with-portage-ng) section
+pins the cross-repo contract.
+
 ## Layout
 
 ```text
-Source/Application/Wrapper/Linux/
+tinderbox-ng/
 ├── README.md                          # this file
-├── tinderbox-ng                       # main script
-├── deploy-host.sh                     # one-shot host install (rsync + symlink + doctor)
-└── tinderbox-ng.d/
-    ├── baseline.make.conf             # /etc/portage/make.conf for baseline
-    ├── baseline.repos.conf            # /etc/portage/repos.conf/gentoo.conf
-    ├── portage-ng-dev.in              # in-chroot launcher (template)
-    ├── deploy-baseline.sh             # safe scp of templates into a live baseline
-    ├── run-matrix.sh                  # tinderbox-matrix test runner
-    ├── compare-matrix.sh              # parallel `compare` driver over a manifest
-    ├── manifest-100.txt               # smoke manifest (100 atoms)
-    └── manifest-1000.txt              # full matrix manifest (1000 atoms)
+├── LICENSE
+├── bin/
+│   ├── tinderbox-ng                   # main script
+│   └── deploy-host.sh                 # one-shot host install (rsync + symlink + doctor)
+├── share/tinderbox-ng/                # everything cp_template / install touches at bootstrap
+│   ├── baseline.make.conf             # /etc/portage/make.conf for baseline
+│   ├── baseline.package.use           # /etc/portage/package.use/00-tinderbox-ng-defaults
+│   ├── baseline.repos.conf            # /etc/portage/repos.conf/gentoo.conf
+│   ├── portage-ng-dev.in              # in-chroot launcher (template)
+│   ├── deploy-baseline.sh             # safe scp of templates into a live baseline
+│   ├── run-matrix.sh                  # tinderbox-matrix test runner
+│   ├── compare-matrix.sh              # parallel `compare` driver over a manifest
+│   ├── easy-pkgs.sh                   # convenience driver over a curated easy-pkg list
+│   ├── manifest-100.txt               # smoke manifest (100 atoms)
+│   └── manifest-1000.txt              # full matrix manifest (1000 atoms)
+├── tools/
+│   └── render-compare-matrix.py       # render compare-matrix TSVs to Markdown
+└── reports/                           # historical compare-matrix runs (snapshots)
 ```
 
 After `bootstrap`, the rig populates the VM as:
@@ -62,21 +75,23 @@ stage3 download.
 ```sh
 # From your dev machine - first-time install on a fresh VM (long: ~hours):
 TINDERBOX_BOOTSTRAP_SELFTEST=1 \
-  Source/Application/Wrapper/Linux/deploy-host.sh --bootstrap root@vm-linux.local
+  bin/deploy-host.sh --bootstrap root@vm-linux.local
 
 # After `git pull` on the dev machine - refresh script + templates only:
-Source/Application/Wrapper/Linux/deploy-host.sh root@vm-linux.local
+bin/deploy-host.sh root@vm-linux.local
 
 # Refresh script + templates AND push your latest portage-ng src into the
 # already-bootstrapped baseline (does NOT regenerate kb.qlf):
-Source/Application/Wrapper/Linux/deploy-host.sh --refresh-portage-ng root@vm-linux.local
+bin/deploy-host.sh --refresh-portage-ng root@vm-linux.local
 ```
 
 `deploy-host.sh` performs, in order:
 
-1. `rsync` of the script + `tinderbox-ng.d/` to `/usr/local/share/tinderbox-ng/`
-   on the remote.
-2. Symlink `/usr/local/sbin/tinderbox-ng` -> the installed script.
+1. `rsync` of the entire repo (`bin/`, `share/`, `tools/`; excludes
+   `.git/`, `reports/`, `bin/deploy-host.sh`) to
+   `/usr/local/share/tinderbox-ng/` on the remote.
+2. Symlink `/usr/local/sbin/tinderbox-ng` →
+   `/usr/local/share/tinderbox-ng/bin/tinderbox-ng`.
 3. `tinderbox-ng doctor` on the remote (preflight checks; fails fast on
    missing prerequisites before any heavy work starts).
 4. Optional: `tinderbox-ng bootstrap` (with `--bootstrap`).
@@ -85,27 +100,31 @@ Source/Application/Wrapper/Linux/deploy-host.sh --refresh-portage-ng root@vm-lin
 
 Forwarded environment: `TINDERBOX_CCACHE_MAX_SIZE`,
 `TINDERBOX_SESSIONS_TMPFS_SIZE`, `TINDERBOX_REBOOTSTRAP`, `STAGE3_VARIANT`,
-`STAGE3_ARCH`, `PORTAGE_TREE_PIN`, `GENTOO_PROFILE`, etc. — see
-`deploy-host.sh --help` for the full list.
+`STAGE3_ARCH`, `PORTAGE_TREE_PIN`, `GENTOO_PROFILE`,
+`PORTAGE_NG_URL`, `PORTAGE_NG_LOCAL`, `PORTAGE_NG_REF`, etc. — see
+`bin/deploy-host.sh --help` for the full list.
 
 ### Manual install (equivalent steps)
 
 ```sh
 # From your dev machine, push the rig to the VM:
-rsync -av --delete Source/Application/Wrapper/Linux/ \
-  vm-linux.local:/usr/local/share/tinderbox-ng/
+rsync -av --delete --exclude '/.git' --exclude '/reports' \
+  ./ vm-linux.local:/usr/local/share/tinderbox-ng/
 
 # Symlink the entry point onto $PATH:
-ssh vm-linux.local sudo ln -sf /usr/local/share/tinderbox-ng/tinderbox-ng \
+ssh vm-linux.local sudo ln -sf \
+  /usr/local/share/tinderbox-ng/bin/tinderbox-ng \
   /usr/local/sbin/tinderbox-ng
 
 # Confirm prerequisites:
 ssh vm-linux.local sudo tinderbox-ng doctor
 ```
 
-The script auto-detects `LIB_DIR`: it prefers a `tinderbox-ng.d` directory
-next to itself (the development checkout), then falls back to
-`/usr/local/share/tinderbox-ng`. Either layout works.
+The script auto-detects `LIB_DIR`: it prefers `share/tinderbox-ng/` next
+to its own `bin/` (works for a dev checkout and the recommended installed
+layout), then falls back to `/usr/local/share/tinderbox-ng/share/tinderbox-ng`
+and finally to a flattened `/usr/local/share/tinderbox-ng/`. Override with
+`TINDERBOX_LIB_DIR`.
 
 ## Lifecycle
 
@@ -130,7 +149,7 @@ qualified) so any missing host-side tool is reported up front:
 4. Clones the Portage tree into `shared/portage-tree/` and pins it
    (commit hash recorded at `shared/portage-tree.commit`).
 5. Writes `/etc/portage/make.conf` and `/etc/portage/repos.conf/gentoo.conf`
-   from the templates in `tinderbox-ng.d/`.
+   from the templates in `share/tinderbox-ng/`.
 6. Runs `eselect profile set default/linux/amd64/23.0/split-usr/no-multilib`
    (matches `config:gentoo_profile/1` in `Source/config.pl`),
    `locale-gen`, `gcc-config -l`, `binutils-config -l`,
@@ -142,8 +161,12 @@ qualified) so any missing host-side tool is reported up front:
    shared cache is writable by Portage's `userfetch`/`usersandbox` user.
    Stage3 does not include ccache; without this step the
    `FEATURES="ccache"` bit is silently inert.
-9. Installs `portage-ng` into `/opt/portage-ng` (rsync from the parent
-   checkout by default; `PORTAGE_NG_URL` / `PORTAGE_NG_REF` switch to git).
+9. Installs `portage-ng` into `/opt/portage-ng` from
+   `$PORTAGE_NG_LOCAL` (rsync) or `$PORTAGE_NG_URL` (git clone).
+   At least one of the two must be set, or one of the conventional deploy
+   paths (`/root/prolog`, `/opt/portage-ng`, `/opt/prolog`) must already
+   exist on the host. `doctor` reports a missing setting as a hard error
+   before anything is downloaded.
 10. Installs the in-chroot `portage-ng-dev` launcher at
    `/usr/local/bin/portage-ng-dev` and `tinderbox-matrix` runner at
    `/usr/local/bin/tinderbox-matrix`.
@@ -230,23 +253,26 @@ rewrites `/etc/ccache.conf`, and re-freezes.
 
 ## portage-ng integration
 
-Verified facts from the parent checkout (versions in this commit):
+Verified facts from the [`portage-ng`](https://github.com/pvdabeel/portage-ng)
+checkout (against the pinned commit `26069d06`):
 
-- `Source/Config/vm-linux.local.pl` (lines 19–40) registers `portage` at
+- `Source/Config/vm-linux.local.pl` registers `portage` at
   `/usr/portage`, `pkg` at `/var/db/pkg`, `distfiles` at
-  `/var/cache/distfiles`. These match the in-chroot mount points used
-  by `tinderbox-ng` exactly. **No edit to that file is needed.**
-- `Source/config.pl:152` pins
+  `/var/cache/distfiles`, and the binpkg cache at
+  `/srv/tinderbox-ng/shared/binpkgs`. These match the in-chroot mount
+  points used by `tinderbox-ng` exactly. **No edit to that file is
+  needed.**
+- `Source/config.pl` pins
   `config:pkg_directory('vm-linux.local','/var/db/pkg')` — the chroot's
   own VDB, which lives in the session's upper layer.
-- `Source/config.pl:359` pins
+- `Source/config.pl` pins
   `config:graph_directory('vm-linux.local','/root/Graph')` — `.merge`
   files land in `/root/Graph/portage/` inside the chroot. The bootstrap
   pre-creates that directory.
-- `Source/config.pl:164–167` puts the world file at
-  `Source/Knowledge/Sets/world/vm-linux.local`. The bootstrap creates an
-  empty file there so `--pretend` runs do not crash on first read; any
-  writes happen in the session upper layer and are wiped by `reset`.
+- The world file lives at `Source/Knowledge/Sets/world/vm-linux.local`.
+  The bootstrap creates an empty file there so `--pretend` runs do not
+  crash on first read; any writes happen in the session upper layer and
+  are wiped by `reset`.
 - `chroot(8)` does not enter a new UTS namespace, so
   `socket:gethostname/1` returns `vm-linux.local` inside the chroot too.
   The script does **not** use `unshare -u`.
@@ -254,6 +280,85 @@ Verified facts from the parent checkout (versions in this commit):
 **Do not run `portage-ng` on the VM host.** The host's `/var/db/pkg` is
 the real production VDB; the existing `vm-linux.local.pl` would point
 at it. Always run `portage-ng-dev` from inside a `tinderbox-ng` session.
+
+## Compatibility with portage-ng
+
+`tinderbox-ng` is the only consumer of a small contract surface that
+`portage-ng` exposes via its `--mode standalone` CLI. Until further
+notice the contract documented here is the API; breaking it requires
+coordinated changes to both repositories.
+
+**Pinned commit known to work:**
+[`pvdabeel/portage-ng@26069d06`](https://github.com/pvdabeel/portage-ng/tree/26069d06)
+— anything from this commit forward should work as long as the items
+below stay stable. If you bump the on-host portage-ng checkout past a
+known-incompatible commit and bootstrap fails, pin
+`PORTAGE_NG_REF=26069d06` (when using `PORTAGE_NG_URL`) until the
+contract is restored.
+
+### CLI surface
+
+`portage-ng-dev --mode standalone` accepts the following flags and any
+combination of them in the cases tinderbox-ng exercises:
+
+| Flag | Used by | Semantic |
+|------|---------|----------|
+| `--ci` | every in-chroot invocation | non-interactive; required for stable exit codes |
+| `--sync` | bootstrap, `refresh-kb` | populates `Knowledge/kb.qlf` (and `profile.qlf`) |
+| `--pretend` | `cmd_compare`, `cmd_portage_ng`, `tinderbox-matrix` | plan only |
+| `--build` | `cmd_compare`, `cmd_portage_ng`, `easy-pkgs.sh` | execute the plan |
+| `--timeout N` | (optional, only when wrapper template forwards it) | per-invocation watchdog |
+
+### Exit-code triage
+
+```
+0 = no assumptions
+1 = only prover cycle-break assumptions
+2 = at least one domain assumption (e.g. masked dep)
+3 = invalid targets (no resolvable atom passed)
+* = crash (anything else)
+```
+
+`compare-matrix.sh` and `_compare_summarize` interpret 0/1/2 as
+"plan produced", 3+ as failure. In particular, `Source/Application/Interface/Action/build.pl`
+in `portage-ng` deliberately returns `halt(3)` on invalid-target failures
+specifically so this triage is unambiguous; if you change exit-code
+semantics in `portage-ng` without updating tinderbox-ng, every compare
+result silently misclassifies.
+
+### Output formats
+
+- The planner footer must contain `Total: <N> action[s]`.
+- The build summary must contain `Total: <N> completed`.
+- ANSI escape sequences around the numbers are tolerated (tinderbox-ng
+  strips them with `sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g'`).
+- `--sync` postcondition: `Knowledge/kb.qlf` exists at the portage-ng
+  repo root after the run.
+
+### Filesystem layout (portage-ng repo root)
+
+`tinderbox-ng` rsyncs the on-host `portage-ng` checkout into the
+baseline at `/opt/portage-ng/`. The wrapper requires the following at
+the repo root:
+
+- `portage-ng.pl` — project entry point (used as `swipl -f`).
+- `Source/loader.pl` — module loader (alternative repo marker).
+- `Source/Config/<hostname>.pl` — host-specific config; hostname inside
+  the chroot is `vm-linux.local`.
+- `Source/Knowledge/Sets/world/<hostname>` — world file (created empty
+  by bootstrap if missing).
+
+The following gitignored paths must NOT be deleted by `refresh-portage-ng`
+(they are produced inside the baseline by `--sync`/runtime and are not
+in the source repo):
+
+- `Knowledge/{kb.qlf, kb.raw, profile.qlf, profile.raw, embeddings.pl,
+  phase_stats.pl, resume.pl}`
+- `Source/{Snapshots, Certificates, Private}/`
+- `Source/Knowledge/Sets/**/*.local`
+
+The rsync exclude list in `bin/tinderbox-ng` (function
+`cmd_refresh_portage_ng`) is the canonical encoding of this rule.
 
 ## Side-by-side comparison: portage-ng vs emerge
 
@@ -409,7 +514,7 @@ ssh root@vm-linux.local tinderbox-ng progress --once
   baseline either** — that bypasses the `cp_template` substitution and
   leaves literal `@NPROC@` placeholders in `make.conf`, crashing emerge
   with `Invalid --jobs parameter: '@NPROC@'`. Use
-  `tinderbox-ng.d/deploy-baseline.sh <template> <user@host:remote-path>`
+  `share/tinderbox-ng/deploy-baseline.sh <template> <user@host:remote-path>`
   to push a template into a running baseline; it applies the same
   substitution as `cp_template` and refuses to deploy if any `@TOKEN@`
   is left unresolved. If you discover a baseline whose `make.conf` still
@@ -462,14 +567,14 @@ ships a particular `kb.qlf`, the resolver disagrees with `emerge`.
 
 ## Out of scope (tracked)
 
-- **Compare pipeline integration.** `Reports/Scripts/generate-emerge-files.sh`
-  hard-codes macOS prefix paths (`/Volumes/...`). To compare `.merge`
-  vs `.emerge` for the same target set on this VM, that script needs a
-  Linux/in-chroot port that calls `emerge -vp` directly (not
-  `EMERGE_VP=/Volumes/.../emerge-vp`). Once adapted, both file types
-  land in `/root/Graph/portage/` inside the session and feed
-  `Reports/Scripts/compare-merge-emerge.py` per the rules in
-  `.cursorrules`.
+- **Compare pipeline integration.** `portage-ng` ships
+  `Reports/Scripts/generate-emerge-files.sh` and
+  `Reports/Scripts/compare-merge-emerge.py` to compare `.merge` vs
+  `.emerge` files. The shell driver hard-codes macOS prefix paths
+  (`/Volumes/...`); a Linux/in-chroot port that calls `emerge -vp`
+  directly is needed before the `.merge`/`.emerge` pipeline can run on
+  the tinderbox VM. Both file types would then land in
+  `/root/Graph/portage/` inside the session.
 - **Optional `dev-util/pkgcore` cross-resolver** as a third opinion
   alongside `emerge` and `portage-ng-dev`.
 - **A/B baselines** (e.g. multilib vs no-multilib in two parallel
@@ -487,9 +592,9 @@ ships a particular `kb.qlf`, the resolver disagrees with `emerge`.
 | `GENTOO_RELENG_KEY` | `0xBB572E0E2D182910` | Release-engineering key fingerprint. |
 | `PORTAGE_TREE_URL` | `https://github.com/gentoo-mirror/gentoo.git` | Tree source. |
 | `PORTAGE_TREE_PIN` | (latest) | Pin to a specific commit at bootstrap. |
-| `PORTAGE_NG_URL` | (unset) | If set: `git clone`; else rsync from local. |
-| `PORTAGE_NG_LOCAL` | parent checkout | Local repo to seed `/opt/portage-ng`. |
-| `PORTAGE_NG_REF` | `HEAD` | Ref to check out (only if `PORTAGE_NG_URL` set). |
+| `PORTAGE_NG_URL` | (unset) | If set: `git clone`; else rsync from `PORTAGE_NG_LOCAL`. |
+| `PORTAGE_NG_LOCAL` | one of `/root/prolog`, `/opt/portage-ng`, `/opt/prolog` if it looks like a portage-ng checkout, else unset | Local portage-ng checkout to seed `/opt/portage-ng`. Bootstrap fails if neither this nor `PORTAGE_NG_URL` resolves. |
+| `PORTAGE_NG_REF` | `HEAD` | Ref to check out (only if `PORTAGE_NG_URL` set). Pin to `26069d06` for a known-compatible portage-ng. |
 | `GENTOO_PROFILE` | `default/linux/amd64/23.0/split-usr/no-multilib` | Must match `config:gentoo_profile/1`. |
 | `GENTOO_LOCALE` | `en_US.UTF-8 UTF-8` | Appended to `/etc/locale.gen`. |
 | `GENTOO_LOCALE_NAME` | `en_US.utf8` | Argument to `eselect locale set`. |

@@ -2,7 +2,7 @@
 #
 # deploy-host.sh - one-shot host install for tinderbox-ng
 #
-# Run from a dev checkout (the directory containing tinderbox-ng + tinderbox-ng.d).
+# Run from a tinderbox-ng repo checkout (the parent of bin/ + share/).
 # Pushes the script + templates to a remote VM, symlinks the entry point onto
 # $PATH, runs `tinderbox-ng doctor` to confirm prerequisites, and (optionally)
 # kicks off `bootstrap` followed by `selftest`.
@@ -92,8 +92,11 @@ done
 [[ -n "$REMOTE" ]] || { usage >&2; echo >&2; echo "error: missing user@vm-host" >&2; exit 2; }
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-[[ -f "$SCRIPT_DIR/tinderbox-ng" ]] || { echo "error: $SCRIPT_DIR/tinderbox-ng not found" >&2; exit 2; }
-[[ -d "$SCRIPT_DIR/tinderbox-ng.d" ]] || { echo "error: $SCRIPT_DIR/tinderbox-ng.d not found" >&2; exit 2; }
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+[[ -f "$REPO_ROOT/bin/tinderbox-ng" ]] \
+  || { echo "error: $REPO_ROOT/bin/tinderbox-ng not found" >&2; exit 2; }
+[[ -d "$REPO_ROOT/share/tinderbox-ng" ]] \
+  || { echo "error: $REPO_ROOT/share/tinderbox-ng not found" >&2; exit 2; }
 
 # Forward bootstrap-relevant env. ssh's `env` strips most variables; pass the
 # small whitelist explicitly so the remote bootstrap honours them.
@@ -138,27 +141,34 @@ log() { printf '[deploy-host] %s\n' "$*" >&2; }
 log "remote: $REMOTE"
 log "prefix: $REMOTE_PREFIX  link: $REMOTE_LINK"
 
-# 1. rsync the script + templates onto the remote.
-log "step 1/4: rsync $SCRIPT_DIR/ -> $REMOTE:$REMOTE_PREFIX/"
+# 1. rsync the repo root (bin/ + share/ + tools/ + reports/) onto the remote.
+#    Excludes:
+#      - deploy-host.sh (this script, not needed on the remote)
+#      - .git/ + reports/ (history + historical artifacts; saves bandwidth)
+log "step 1/4: rsync $REPO_ROOT/ -> $REMOTE:$REMOTE_PREFIX/"
 remote_root "install -d $(printf '%q' "$REMOTE_PREFIX")"
 
 rsync -a --delete \
   --exclude '.DS_Store' \
   --exclude '__pycache__' \
-  --exclude 'deploy-host.sh' \
+  --exclude '/.git' \
+  --exclude '/reports' \
+  --exclude '/bin/deploy-host.sh' \
   --rsync-path="sudo -n rsync 2>/dev/null || rsync" \
-  "$SCRIPT_DIR/" "$REMOTE:$REMOTE_PREFIX/" || \
+  "$REPO_ROOT/" "$REMOTE:$REMOTE_PREFIX/" || \
 rsync -a --delete \
   --exclude '.DS_Store' \
   --exclude '__pycache__' \
-  --exclude 'deploy-host.sh' \
-  "$SCRIPT_DIR/" "$REMOTE:$REMOTE_PREFIX/"
+  --exclude '/.git' \
+  --exclude '/reports' \
+  --exclude '/bin/deploy-host.sh' \
+  "$REPO_ROOT/" "$REMOTE:$REMOTE_PREFIX/"
 
 # 2. Symlink the entry point.
-log "step 2/4: symlink $REMOTE_LINK -> $REMOTE_PREFIX/tinderbox-ng"
+log "step 2/4: symlink $REMOTE_LINK -> $REMOTE_PREFIX/bin/tinderbox-ng"
 remote_root "install -d $(dirname $(printf '%q' "$REMOTE_LINK")) && \
-             ln -sfn $(printf '%q' "$REMOTE_PREFIX/tinderbox-ng") $(printf '%q' "$REMOTE_LINK") && \
-             chmod +x $(printf '%q' "$REMOTE_PREFIX/tinderbox-ng")"
+             ln -sfn $(printf '%q' "$REMOTE_PREFIX/bin/tinderbox-ng") $(printf '%q' "$REMOTE_LINK") && \
+             chmod +x $(printf '%q' "$REMOTE_PREFIX/bin/tinderbox-ng")"
 
 # 3. Run doctor to confirm host prerequisites.
 log "step 3/4: $REMOTE_LINK doctor"
@@ -170,9 +180,9 @@ fi
 # 4. Optional follow-ups.
 if (( DO_REFRESH_PNG )); then
   log "step 4/4: $REMOTE_LINK refresh-portage-ng"
-  log "  (this rsyncs your latest portage-ng source into the existing baseline)"
-  remote_root "$ENV_PREFIX PORTAGE_NG_LOCAL=$REMOTE_PREFIX/../portage-ng \
-               $(printf '%q' "$REMOTE_LINK") refresh-portage-ng" || \
+  log "  (this rsyncs the on-host portage-ng source into the existing baseline)"
+  log "  set PORTAGE_NG_LOCAL or PORTAGE_NG_URL in your env to point at it"
+  remote_root "$ENV_PREFIX $(printf '%q' "$REMOTE_LINK") refresh-portage-ng" || \
     echo "[deploy-host] refresh-portage-ng failed (baseline may not exist yet)" >&2
 fi
 

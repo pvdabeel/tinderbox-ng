@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Reports/Scripts/render-compare-matrix.py
+tools/render-compare-matrix.py
 
 Render a Markdown comparison report from one or more compare-matrix
-TSVs produced by Source/Application/Wrapper/Linux/tinderbox-ng.d/compare-matrix.sh.
+TSVs produced by share/tinderbox-ng/compare-matrix.sh.
 
 Typical usage:
 
-    python3 Reports/Scripts/render-compare-matrix.py \
+    python3 tools/render-compare-matrix.py \
         --pretend /tmp/pretend.tsv \
         --build   /tmp/build.tsv \
         --commit  $(git rev-parse --short HEAD) \
-        --out     Reports/tinderbox-compare-$(date +%Y-%m-%d)-$(git rev-parse --short HEAD).md
+        --out     reports/tinderbox-compare-$(date +%Y-%m-%d)-$(git rev-parse --short HEAD).md
 
 Either --pretend or --build may be omitted; the corresponding section
 will be skipped in the report.
@@ -266,7 +266,7 @@ def render(pretend: Optional[list[dict]],
            commit: str,
            build_logs: Optional[Path] = None,
            pretend_logs: Optional[Path] = None,
-           manifest: str = "Source/Application/Wrapper/Linux/tinderbox-ng.d/manifest-100.txt") -> str:
+           manifest: str = "share/tinderbox-ng/manifest-100.txt") -> str:
     if pretend is not None:
         annotate_target_install(pretend, pretend_logs)
     if build is not None:
@@ -284,7 +284,7 @@ def render(pretend: Optional[list[dict]],
     parts.append("present in the stage3 VDB, so each run goes through the full")
     parts.append("`clean → setup → unpack → prepare → configure → compile → install →")
     parts.append("merge` chain on both engines.\n")
-    parts.append(f"Driver:   `Source/Application/Wrapper/Linux/tinderbox-ng.d/compare-matrix.sh`")
+    parts.append(f"Driver:   `share/tinderbox-ng/compare-matrix.sh`")
     parts.append(f"Manifest: `{manifest}`")
     parts.append(f"Commit:   `{commit}`\n")
 
@@ -468,7 +468,7 @@ def main() -> None:
                    help="dir of per-package build logs (for silent-failure detection)")
     p.add_argument("--commit", required=True, help="git short commit hash")
     p.add_argument("--manifest",
-                   default="Source/Application/Wrapper/Linux/tinderbox-ng.d/manifest-100.txt",
+                   default="share/tinderbox-ng/manifest-100.txt",
                    help="manifest path to cite in the report header")
     p.add_argument("--out", type=Path, required=True, help="output markdown path")
     args = p.parse_args()

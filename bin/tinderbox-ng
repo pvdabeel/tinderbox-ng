@@ -11,7 +11,7 @@
 # $TINDERBOX_ROOT (default /srv/tinderbox-ng), the Portage tree binds in
 # read-only, and host-side caches like /var/db/pkg are not mounted in.
 #
-# See Source/Application/Wrapper/Linux/README.md for deployment notes.
+# See README.md in this repository for deployment notes.
 
 set -euo pipefail
 
@@ -50,15 +50,13 @@ PORTAGE_TREE_URL="${PORTAGE_TREE_URL:-https://github.com/gentoo-mirror/gentoo.gi
 PORTAGE_TREE_PIN="${PORTAGE_TREE_PIN:-}"
 
 # portage-ng repo. PORTAGE_NG_URL (git clone) takes precedence; otherwise
-# the script rsyncs from PORTAGE_NG_LOCAL into the baseline. Auto-detection
-# walks several candidates and picks the first that looks like a portage-ng
-# checkout (i.e. has Source/portage-ng.pl):
-#
-#   1. Parent of the resolved script (development checkout: works when the
-#      script lives at <repo>/Source/Application/Wrapper/Linux/tinderbox-ng)
-#   2. Common deploy paths: /root/prolog, /opt/portage-ng
-#   3. Fall back to "" (operator must set PORTAGE_NG_LOCAL explicitly;
-#      doctor surfaces this as an error before bootstrap touches anything)
+# the script rsyncs from PORTAGE_NG_LOCAL into the baseline. Since
+# tinderbox-ng now lives in its own repository, there is no in-tree
+# auto-detection: PORTAGE_NG_URL or PORTAGE_NG_LOCAL must be set
+# explicitly, or one of the conventional deploy paths
+# (/root/prolog, /opt/portage-ng, /opt/prolog) must already exist on the
+# host. doctor surfaces a missing setting as an error before bootstrap
+# touches anything.
 SCRIPT_PATH="$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 
@@ -70,8 +68,6 @@ _pn_is_repo() {
 
 _pn_autodetect() {
   local cand
-  cand="$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." 2>/dev/null && pwd || echo "")"
-  if [[ -n "$cand" ]] && _pn_is_repo "$cand"; then printf '%s' "$cand"; return; fi
   for cand in /root/prolog /opt/portage-ng /opt/prolog; do
     if _pn_is_repo "$cand"; then printf '%s' "$cand"; return; fi
   done
@@ -82,12 +78,21 @@ PORTAGE_NG_URL="${PORTAGE_NG_URL:-}"
 PORTAGE_NG_LOCAL="${PORTAGE_NG_LOCAL:-$(_pn_autodetect)}"
 PORTAGE_NG_REF="${PORTAGE_NG_REF:-HEAD}"
 
-# Library / template directory. In a development checkout this is the .d
-# directory next to the (resolved) script; in an installed deployment it is
-# typically /usr/local/share/tinderbox-ng/tinderbox-ng.d.
-LIB_DIR="${TINDERBOX_LIB_DIR:-$SCRIPT_DIR/tinderbox-ng.d}"
-if [[ ! -d "$LIB_DIR" ]] && [[ -d /usr/local/share/tinderbox-ng/tinderbox-ng.d ]]; then
-  LIB_DIR=/usr/local/share/tinderbox-ng/tinderbox-ng.d
+# Library / template directory. The repo layout is bin/tinderbox-ng next
+# to share/tinderbox-ng/, so $SCRIPT_DIR/../share/tinderbox-ng works for
+# both a dev checkout and the standard installed layout produced by
+# deploy-host.sh (entire repo rsynced under /usr/local/share/tinderbox-ng/,
+# entry point symlinked at /usr/local/sbin/tinderbox-ng). Override with
+# TINDERBOX_LIB_DIR for non-standard installs.
+LIB_DIR="${TINDERBOX_LIB_DIR:-$SCRIPT_DIR/../share/tinderbox-ng}"
+if [[ ! -d "$LIB_DIR" ]] && [[ -d /usr/local/share/tinderbox-ng/share/tinderbox-ng ]]; then
+  LIB_DIR=/usr/local/share/tinderbox-ng/share/tinderbox-ng
+fi
+if [[ ! -d "$LIB_DIR" ]] && [[ -d /usr/local/share/tinderbox-ng ]] \
+   && [[ -f /usr/local/share/tinderbox-ng/baseline.make.conf ]]; then
+  # FHS-style install: bin/tinderbox-ng under /usr/local/bin and
+  # templates flattened directly under /usr/local/share/tinderbox-ng.
+  LIB_DIR=/usr/local/share/tinderbox-ng
 fi
 
 # Profile + locale (must match Source/config.pl:96 and what the baseline runs)
@@ -2943,10 +2948,10 @@ Environment:
   PORTAGE_TREE_URL                Default https://github.com/gentoo-mirror/gentoo.git
   PORTAGE_TREE_PIN                Optional commit to pin during bootstrap.
   PORTAGE_NG_URL                  If set: git clone. Otherwise rsync PORTAGE_NG_LOCAL.
-  PORTAGE_NG_LOCAL                Local portage-ng checkout to seed (default: parent of script).
+  PORTAGE_NG_LOCAL                Local portage-ng checkout to seed (e.g. /opt/portage-ng).
   TINDERBOX_REBOOTSTRAP=1         Allow `bootstrap` to overwrite an existing baseline.
 
-See Source/Application/Wrapper/Linux/README.md for deployment notes.
+See README.md in this repository for deployment notes.
 USAGE
 }
 
