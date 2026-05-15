@@ -1,0 +1,831 @@
+.\" Manpage for tinderbox-ng
+.\" Copyright (c) 2005-2026, Pieter Van den Abeele
+.\" Distributed under the terms of the LICENSE file in the project root.
+.TH TINDERBOX\-NG 8 "2026-05-15" "tinderbox\-ng" "Gentoo build\-testing rig"
+.
+.SH NAME
+tinderbox\-ng \- Gentoo build\-testing rig with overlayfs sessions
+.
+.SH SYNOPSIS
+.B tinderbox\-ng
+.I subcommand
+.RI [ options ]
+.RI [ args... ]
+.PP
+.B tinderbox\-ng
+.RB { \-h | \-\-help | help }
+.
+.SH DESCRIPTION
+.B tinderbox\-ng
+is a self\-contained Gentoo build\-testing rig. It builds an immutable
+\fBbaseline\fR (latest stage3 + SWI\-Prolog +
+.B portage\-ng
++ matching
+.IR kb.qlf )
+and exposes it as the lower layer of an overlayfs\-backed
+.BR chroot (1).
+Each experiment runs in its own \fIsession\fR whose writes land in an upper
+layer that can be discarded with one command. The host OS root is never
+touched: the rig lives entirely under
+.BR $TINDERBOX_ROOT
+(default
+.IR /srv/tinderbox-ng ),
+the Portage tree binds in read\-only, and host\-side caches like
+.I /var/db/pkg
+are not mounted in.
+.PP
+The headline workflow is \fBside\-by\-side resolver comparison\fR: run the same
+target through
+.B portage\-ng
+and the traditional Gentoo
+.BR emerge (1)
+in two fresh, identical sessions and inspect their differences. The bundled
+Python tooling then feeds those per\-session logs into plan\-correctness
+metrics (Jaccard / Kendall\-tau / Spearman / dependency\-aware concordance) and
+forecasting tables (median / p75 / max of phase byte and wall\-clock counts).
+.PP
+.B tinderbox\-ng
+runs every chroot operation inside an unshared mount namespace
+.RB ( "unshare \-\-mount \-\-propagation=private" ),
+so all bind\-mounts disappear automatically when the helper exits, even on
+.BR SIGKILL .
+.
+.SH SUBCOMMANDS
+The first non\-flag argument selects the subcommand. The complete list,
+grouped by lifecycle stage, follows.
+.
+.SS Bootstrap and maintenance
+.TP
+.B doctor
+Preflight \(em verify the host has every required tool, kernel feature, template
+and disk\-space margin. Reports all problems in one pass and is run by
+.B bootstrap
+automatically (skip with
+.BR TINDERBOX_SKIP_DOCTOR=1 ).
+.TP
+.B bootstrap
+Build the immutable baseline (stage3 + SWI\-Prolog +
+.BR ccache (1)
++
+.B portage\-ng
++
+.IR kb.qlf ).
+Long\-running (~hours). Set
+.B TINDERBOX_BOOTSTRAP_SELFTEST=1
+to chain
+.B selftest
+on completion. Set
+.B TINDERBOX_REBOOTSTRAP=1
+to overwrite an existing baseline.
+.TP
+.B selftest
+Smoke\-test a freshly bootstrapped baseline: runs
+.B "compare \-\-pretend sys\-apps/portage"
+in a fresh session. Override the target via
+.BR TINDERBOX_SELFTEST_TARGET .
+.TP
+.BR "refresh\-tree " [ "" \fIcommit\fR ]
+Re\-pin
+.IR shared/portage\-tree
+to
+.I commit
+(default: tip of upstream default branch). Existing sessions keep the old
+tree until they are reset.
+.TP
+.B refresh\-kb
+Regenerate
+.I kb.qlf
+inside the baseline against the pinned tree. Briefly thaws the baseline
+write\-protect for the duration of the rebuild.
+.TP
+.B refresh\-portage\-ng
+Re\-deploy the
+.B portage\-ng
+source tree into the baseline from
+.B PORTAGE_NG_LOCAL
+(or
+.BR PORTAGE_NG_URL ).
+Excludes baseline\-internal Knowledge artefacts (see
+.BR FILES ).
+Does NOT regenerate
+.IR kb.qlf .
+.TP
+.B install\-ccache
+Retrofit
+.B dev\-util/ccache
++
+.I /etc/ccache.conf
+into an existing baseline (or bump
+.IR max_size ).
+Idempotent.
+.TP
+.B install\-kernel\-sources
+Retrofit
+.B sys\-kernel/gentoo\-sources
+(or
+.BR $TINDERBOX_KERNEL_PACKAGE )
+into an existing baseline and set
+.I /usr/src/linux
+via
+.BR "eselect kernel set 1" .
+Required for ebuilds that probe kernel headers during
+.IR src_configure / src_compile .
+Idempotent.
+.TP
+.B baseline\-thaw
+One\-shot migration for legacy baselines bootstrapped by an older
+.B tinderbox\-ng
+that called
+.I bootstrap_freeze
+.RB ( "chmod a-w" ).
+Restores owner\-write on every file and directory in the baseline. Idempotent
+and cheap (~1\~s for a 70k\-file stage3).
+.B doctor
+warns when this is needed.
+.
+.SS Session lifecycle
+.TP
+.BI "new " name
+Create an empty session. The session has its own upper, work, merged and log
+directories under
+.IR $TINDERBOX_ROOT/sessions/ name / .
+.TP
+.BI "enter " name
+Mount overlay + binds and
+.BR chroot (1)
+in interactively.
+.TP
+.BI "exec " "name " \-\- " cmd..."
+Mount, run
+.I cmd
+non\-interactively, capture log, unmount. Exits with the command's exit code.
+.TP
+.BI "exit " name
+Tear down all mounts for
+.I name
+(idempotent).
+.TP
+.BI "reset " name
+Discard the upper layer (revert to baseline). Session directory is preserved.
+.TP
+.BI "destroy " name
+Remove the session directory entirely.
+.TP
+.B list
+Show sessions, mount status, upper size, age.
+.TP
+.BI "diff " name
+Print files modified in the session's upper layer.
+.TP
+.B status
+Show
+.B tinderbox\-ng
+global state (paths, pin, sizes).
+.
+.SS Resolver operations
+.TP
+.BI "portage\-ng " "name " [ "\-\-pretend" | "\-\-build" "] " args...
+Run
+.I portage\-ng\-dev
+inside the session. Default mode:
+.BR \-\-build .
+Aliases:
+.BR portage_ng ", " pn .
+.TP
+.BI "emerge " "name " [ "\-\-pretend" "] " args...
+Run
+.I /usr/bin/emerge
+inside the session
+.RB ( \-\-oneshot ).
+Alias:
+.BR em .
+.TP
+.B "compare " [ "\-\-pretend" | "\-\-build" "] [" "\-\-keep" "] [" "\-\-label \fINAME\fR" "] " \fIpkg\fR...
+Spin two fresh sessions, run
+.B portage\-ng
+AND
+.B emerge
+on the same target in parallel, print a side\-by\-side summary (exit codes,
+plan size, completed steps, VDB delta, first error). Default:
+.BR \-\-pretend .
+With
+.BR \-\-keep ,
+the session upper layers are preserved at
+.IR /srv/tinderbox-ng/sessions/pkg-cmp-{portage-ng,emerge}-<label>/upper/ .
+Logs land in
+.IR /srv/tinderbox-ng/logs/compare-<label>-<stamp>/ ,
+split per engine into
+.IR portage-ng.plan.log ,
+.IR portage-ng.build.log ,
+.IR emerge.plan.log ,
+.IR emerge.build.log ,
+plus a per\-target build log
+.RI ( portage-ng.target.<cp>.build.log ", " emerge.target.<cp>.build.log[.gz] )
+and
+.B portage\-ng's
+.IR phase_stats.pl .
+Alias:
+.BR cmp .
+.TP
+.B "continue " [ "\-\-run \fIDIR\fR" "] [" "\-\-jobs \fIN\fR" "] [" "\-\-background" "]"
+Resume a
+.B compare\-matrix
+run that was interrupted (host crash, reboot,
+.BR SIGINT ).
+Auto\-mounts the sessions
+.BR tmpfs (5),
+auto\-detects the most recent run, recovers mode/manifest/jobs from
+.IR meta.txt ,
+and dispatches
+.B compare\-matrix
+on every target not yet in
+.IR results.tsv .
+Appends to the original run's TSV +
+.I meta.txt
+(no sibling stamp dir). Alias:
+.BR resume .
+.
+.SS Observability
+.TP
+.B "progress " [ "\-\-once" "] [" "\-\-interval \fIN\fR" "] [" "\-\-run \fIDIR\fR" "]"
+Live dashboard: progress bar + ETA + load avg + RAM + tmpfs + active sessions,
+refreshed every
+.I N
+seconds (default 2). Auto\-detects the latest
+.B compare\-matrix
+run.
+.B \-\-once
+forces a one\-shot dump (also the default when stdout is not a tty). Alias:
+.BR monitor .
+.TP
+.B "analyze " [ "\-\-run \fIDIR\fR" " | " "\-\-logdir \fIDIR\fR" "] [" "\-\-out \fIFILE\fR" "] [" "\-\-jobs \fIN\fR" "] [" "\-\-md5\-cache \fIDIR\fR" "] [" "\-\-target\-regex \fIRE\fR" "] [" "\-\-full\-lists" "]"
+Plan\-correctness analysis over a matrix run (or any directory of
+.IR compare-<label>-<stamp>/
+subdirs). Pairs every
+.I portage-ng.plan.log
+with the matching
+.I emerge.plan.log
+and feeds them through
+.B share/tinderbox\-ng/compare\-merge\-emerge.py
+to compute Jaccard set agreement, Kendall+Spearman ordering metrics,
+dependency\-aware concordance and violation rate
+.RB ( \-\-md5\-cache
+required), domain assumptions, blockers, cycle breaks, download set
+agreement, and timing. Writes
+.IR <source>/analysis.json
+and
+.IR <source>/analysis.txt .
+Alias:
+.BR analyse .
+.TP
+.B "phase\-stats " [ "\-\-run \fIDIR\fR" " | " "\-\-logdir \fIDIR\fR" " | " "\-\-src \fIDIR\fR" "] [" "\-\-out \fIFILE\fR" "] [" "\-\-aggregator \fINAME\fR" "] [" "\-\-min\-observations \fIN\fR" "] [" "\-\-exclude\-glob \fIPAT\fR" "]..."
+Consolidate the per\-session
+.I phase_stats.pl
+files that
+.B "compare \-\-build"
+salvages into each compare logdir into a single master forecasting file
+suitable as the next
+.B portage\-ng
+instance's
+.IR Knowledge/phase_stats.pl .
+Aggregator is one of
+.B median
+(default; robust against cold\-cache outliers),
+.BR mean ,
+.BR max
+(worst\-case envelope),
+.B p75
+or
+.BR p90
+(pessimistic forecasts).
+.B \-\-min\-observations \fIN\fR
+drops
+.RI ( Entry , Phase )
+buckets with fewer than
+.I N
+samples.
+.B \-\-exclude\-glob
+.I PAT
+skips matching paths during the input scan (repeatable). Default output:
+.IR <run>/phase_stats.pl .
+Aliases:
+.BR phase_stats ", " consolidate\-phase\-stats .
+.TP
+.B "extract\-timing " [ "\-\-run \fIDIR\fR" " | " "\-\-logdir \fIDIR\fR" " | " "\-\-src \fIDIR\fR" " | " "\-\-session \fIDIR\fR" "] [" "\-\-out \fIFILE\fR" "] [" "\-\-quiet" "]"
+Extract per\-engine, per\-phase wall\-clock timing from one or many
+compare session log directories and emit a consolidated JSON report
+comparing
+.B portage\-ng
+to
+.BR emerge .
+Reads the
+.IR <log>.timing
+companion files
+.B compare
+writes after each pass
+.RI ( started ", " ended ", " wall_time_ms ", " rc );
+falls back to the log file's ctime/mtime delta for older sessions
+that predate per\-pass timing capture (entries flagged with
+.IR mtime_estimated:\ true ).
+Each entry contains the four pass timings (portage\-ng plan and build,
+emerge plan and build), pn/em ratios, recovered
+.B cpv
+when extractable, and per\-phase totals from the session's
+.I phase_stats.pl
+when present. The summary block aggregates avg/p50/p95/max per pass
+and head\-to\-head wins. Default output:
+.IR <source>/timing.json .
+Aliases:
+.BR timing ", " extract_timing .
+.
+.SS tmpfs management
+.TP
+.B tmpfs\-up
+Mount the shared sessions
+.BR tmpfs (5)
+(idempotent). Auto\-runs on
+.BR new ,
+.B compare
+and
+.BR continue ;
+this is for explicit pre\-allocation before a long batch (or to remount after
+a host reboot).
+.TP
+.B tmpfs\-down
+Unmount the shared sessions
+.BR tmpfs (5)
+(only if no sessions remain; destroys their contents).
+.
+.SH OPTIONS
+Most options are subcommand\-specific; see the per\-subcommand descriptions
+above and
+.B "tinderbox\-ng \fIsubcommand\fR \-\-help"
+for the full list. The following are accepted by every invocation:
+.TP
+.BR \-h ", " \-\-help ", " help
+Print the top\-level usage summary and exit.
+.
+.SH FILES
+.TP
+.I /srv/tinderbox-ng/baseline/
+Immutable baseline (overlayfs lower layer). Frozen after
+.BR bootstrap .
+.TP
+.I /srv/tinderbox-ng/shared/
+Shared, persistent caches. Bind\-mounted into every session.
+.RS
+.TP
+.I portage-tree/
+Git\-pinned Portage tree (mounted read\-only into sessions).
+.TP
+.I portage-tree.commit
+Current pinned commit hash.
+.TP
+.I distfiles/
+Persistent fetch cache.
+.TP
+.I ccache/
+Optional shared ccache.
+.TP
+.I binpkgs/
+Optional shared binpkgs cache.
+.TP
+.I stage3/
+Downloaded stage3 tarballs and signatures.
+.RE
+.TP
+.I /srv/tinderbox-ng/sessions/<name>/
+Per\-session directory.
+.RS
+.TP
+.I upper/
+OverlayFS upper layer (writes during the session).
+.TP
+.I work/
+OverlayFS work directory.
+.TP
+.I merged/
+OverlayFS merged view (the chroot root).
+.TP
+.I logs/
+Session log directory.
+.TP
+.I info
+Session metadata (created\-at, owner, command line).
+.TP
+.I .lock
+.BR flock (1)
+file used for concurrent\-access serialisation.
+.RE
+.TP
+.I /srv/tinderbox-ng/logs/compare-<label>-<stamp>/
+Per\-package compare logdir produced by
+.BR compare .
+Contains
+.IR portage-ng.plan.log ,
+.IR portage-ng.build.log ,
+.IR portage-ng.target.<cp>.build.log ,
+.IR phase_stats.pl ,
+.IR emerge.plan.log ,
+.IR emerge.build.log ,
+and
+.IR emerge.target.<cp>.build.log[.gz] .
+.TP
+.I /srv/tinderbox-ng/reports/compare-matrix-<stamp>/
+Matrix\-run report directory:
+.IR results.tsv ,
+.IR meta.txt ,
+.IR <label>.log
+per package, plus the
+.IR analysis.{json,txt}
+and
+.IR phase_stats.pl
+artefacts produced by
+.B analyze
+and
+.BR phase\-stats .
+.TP
+.I /usr/local/share/tinderbox-ng/
+Default install prefix populated by
+.BR deploy-host.sh (8).
+Layout under the prefix:
+.RS
+.TP
+.I bin/tinderbox-ng
+The entry point.
+.I /usr/local/sbin/tinderbox-ng
+is a symlink to this file.
+.TP
+.I libexec/tinderbox-ng/
+Executable helpers
+.B tinderbox\-ng
+invokes internally
+.RI ( compare-matrix.sh ", "
+.IR compare-merge-emerge.py ", "
+.IR consolidate-phase-stats.py ", "
+.IR extract-timing.py ", "
+.IR run-matrix.sh ).
+.TP
+.I share/tinderbox-ng/
+Read\-only data: baseline config templates
+.RI ( baseline.make.conf ", "
+.IR baseline.package.use ", "
+.IR baseline.repos.conf ", "
+.IR portage-ng-dev.in )
+and the matrix manifests
+.RI ( manifest-100.txt ", "
+.IR manifest-1000.txt ).
+.TP
+.I share/man/man8/tinderbox-ng.8
+Manpage source.
+.I /usr/local/share/man/man8/tinderbox-ng.8
+is a symlink to this file.
+.RE
+.
+.SH ENVIRONMENT
+.TP
+.B TINDERBOX_ROOT
+Root for everything (default
+.IR /srv/tinderbox-ng ).
+.TP
+.B TINDERBOX_LIBEXEC_DIR
+Override the directory containing executable helpers
+.RB ( compare-matrix.sh ", "
+.BR compare-merge-emerge.py ", "
+.BR consolidate-phase-stats.py ", "
+.BR run-matrix.sh ).
+Default
+.IR $SCRIPT_DIR/../libexec/tinderbox-ng .
+.TP
+.B TINDERBOX_SHARE_DIR
+Override the directory containing data templates and manifests
+.RB ( baseline.make.conf ", "
+.BR portage-ng-dev.in ", "
+.BR manifest-1000.txt ", "
+etc.).
+Default
+.IR $SCRIPT_DIR/../share/tinderbox-ng .
+.TP
+.B TINDERBOX_LIB_DIR
+Legacy single\-bucket override that maps to both
+.B TINDERBOX_LIBEXEC_DIR
+and
+.BR TINDERBOX_SHARE_DIR .
+Honoured for backward compatibility with pre\-reorg flat installs.
+.TP
+.B TINDERBOX_SESSIONS_TMPFS_SIZE
+.BR tmpfs (5)
+size cap for
+.B $TINDERBOX_ROOT/sessions
+(default
+.BR 100G ;
+empty or
+.B 0
+disables).
+.TP
+.B TINDERBOX_CCACHE_MAX_SIZE
+Cap for the shared
+.BR ccache (1)
+(default
+.BR 100G ).
+.TP
+.B TINDERBOX_KERNEL_PACKAGE
+Kernel\-source package emerged into the baseline (default
+.BR sys\-kernel/gentoo\-sources ).
+.TP
+.B TINDERBOX_MDNS_HOSTS
+Space\-separated hostnames that must resolve from inside the chroot (the
+host resolves via
+.BR avahi (8)
+and the script injects the IPs into the session's
+.IR /etc/hosts ).
+.TP
+.B TINDERBOX_REBOOTSTRAP
+Set to
+.B 1
+to allow
+.B bootstrap
+to overwrite an existing baseline.
+.TP
+.B TINDERBOX_BOOTSTRAP_SELFTEST
+Set to
+.B 1
+to run
+.B selftest
+at the end of a successful
+.BR bootstrap .
+.TP
+.B TINDERBOX_SELFTEST_TARGET
+Override the package
+.B selftest
+runs through
+.BR compare .
+.TP
+.B TINDERBOX_SKIP_DOCTOR
+Set to
+.B 1
+to bypass the implicit
+.B doctor
+preflight inside
+.BR bootstrap .
+.TP
+.B TINDERBOX_COMPARE_ANALYZER
+Override the path to
+.IR compare-merge-emerge.py .
+Default
+.BI $LIBEXEC_DIR /compare-merge-emerge.py .
+Read by
+.BR analyze .
+.TP
+.B TINDERBOX_PHASE_STATS_CONSOLIDATOR
+Override the path to
+.IR consolidate-phase-stats.py .
+Default
+.BI $LIBEXEC_DIR /consolidate-phase-stats.py .
+Read by
+.BR phase\-stats .
+.TP
+.B TINDERBOX_TIMING_EXTRACTOR
+Override the path to
+.IR extract-timing.py .
+Default
+.BI $LIBEXEC_DIR /extract-timing.py .
+Read by
+.BR extract\-timing .
+.TP
+.B STAGE3_VARIANT
+Stage3 variant (default
+.BR amd64\-openrc\-splitusr ).
+.TP
+.B STAGE3_ARCH
+Stage3 architecture (default
+.BR amd64 ).
+.TP
+.B STAGE3_BASE_URL
+Stage3 mirror base URL.
+.TP
+.B GENTOO_PROFILE
+Profile to set in the baseline (default
+.BR default/linux/amd64/23.0/split\-usr/no\-multilib ;
+must match
+.I Source/config.pl
+on the
+.B portage\-ng
+side).
+.TP
+.B GENTOO_LOCALE ", " GENTOO_LOCALE_NAME
+Locale generated and selected in the baseline.
+.TP
+.B PORTAGE_TREE_URL
+Portage tree git URL (default the
+.B gentoo\-mirror
+repository).
+.TP
+.B PORTAGE_TREE_PIN
+Optional commit to pin during
+.BR bootstrap .
+.TP
+.B PORTAGE_NG_URL
+If set,
+.B bootstrap
+.BR git-clone (1)s
+the
+.B portage\-ng
+source from this URL. Otherwise
+.BR rsync (1)s
+from
+.BR PORTAGE_NG_LOCAL .
+.TP
+.B PORTAGE_NG_LOCAL
+Local
+.B portage\-ng
+checkout to seed (e.g.
+.IR /opt/portage-ng ).
+Auto\-detected from the conventional paths
+.IR /root/prolog ,
+.IR /opt/portage-ng ,
+.I /opt/prolog
+when unset.
+.TP
+.B PORTAGE_NG_REF
+Git ref to check out from the
+.B portage\-ng
+clone (default
+.BR HEAD ).
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+General error (missing prerequisites, command failure, exactly one engine
+failed in
+.BR compare ).
+.TP
+.B 2
+Domain\-level error (usage error, both engines failed in
+.BR compare ).
+.PP
+The
+.B compare
+subcommand specifically returns 0 if both engines succeeded, 1 if exactly one
+failed, and 2 if both failed \(em useful for CI sweeps. The
+.B portage\-ng\-dev
+exit codes propagated through
+.B portage\-ng
+and
+.B compare
+follow the
+.B portage\-ng
+convention (0 = no assumptions; 1 = prover cycle\-break assumptions only;
+2 = domain assumptions).
+.
+.SH EXAMPLES
+.SS First\-time install on a fresh VM
+.nf
+.RS
+TINDERBOX_BOOTSTRAP_SELFTEST=1 \\
+    bin/deploy\-host.sh \-\-bootstrap root@vm\-linux.local
+.RE
+.fi
+.PP
+Pushes the rig to the VM, runs
+.BR doctor ,
+runs
+.B bootstrap
+(~hours), runs
+.BR selftest .
+.
+.SS Side\-by\-side resolver comparison
+.nf
+.RS
+sudo tinderbox\-ng compare app\-misc/jq
+sudo tinderbox\-ng compare \-\-build app\-misc/jq
+sudo tinderbox\-ng compare \-\-build \-\-keep \-\-label jq\-debug app\-misc/jq
+.RE
+.fi
+.
+.SS Plan\-correctness analysis
+.nf
+.RS
+sudo tinderbox\-ng analyze
+sudo tinderbox\-ng analyze \-\-md5\-cache \\
+    /srv/tinderbox\-ng/baseline/var/db/repos/gentoo/metadata/md5\-cache
+sudo tinderbox\-ng analyze \-\-target\-regex '^dev\-libs/' \-\-full\-lists
+.RE
+.fi
+.
+.SS Build\-time forecast consolidation
+.nf
+.RS
+# After a matrix run, build a master phase_stats.pl from every
+# per\-session phase_stats.pl salvaged into compare logdirs:
+sudo tinderbox\-ng phase\-stats
+
+# Pessimistic forecast across an arbitrary archive tree:
+sudo tinderbox\-ng phase\-stats \-\-src /backups/2026\-Q1 \-\-aggregator p90 \\
+    \-\-out /tmp/master.pl
+.RE
+.fi
+.
+.SS Wall\-clock timing comparison
+.nf
+.RS
+# After a matrix run, extract per\-engine timings into a JSON report:
+sudo tinderbox\-ng extract\-timing
+# Equivalent: scope by logs dir directly
+sudo tinderbox\-ng extract\-timing \-\-src /srv/tinderbox\-ng/logs \\
+    \-\-out /tmp/timing.json
+# Single session:
+sudo tinderbox\-ng extract\-timing \-\-session \\
+    /srv/tinderbox\-ng/logs/compare\-app_misc_jq\-20260515T143052
+
+# Drop the master in as portage\-ng's forecast seed:
+sudo cp /srv/tinderbox\-ng/reports/compare\-matrix\-<stamp>/phase_stats.pl \\
+    /opt/portage\-ng/Knowledge/phase_stats.pl
+.RE
+.fi
+.
+.SS Resume an interrupted matrix run
+.nf
+.RS
+sudo tinderbox\-ng continue \-\-jobs 16 \-\-background
+.RE
+.fi
+.
+.SH SECURITY
+.B tinderbox\-ng
+must run as root (it manages bind\-mounts, mount namespaces and chroot jails).
+The script never modifies the host root: every chroot operation runs inside an
+unshared mount namespace
+.RB ( "unshare \-\-mount \-\-propagation=private" ),
+and all bind\-mounts disappear when the helper exits, even on
+.BR SIGKILL .
+.PP
+The Portage tree is bind\-mounted read\-only into every session. The host's
+.I /var/db/pkg
+is not mounted into any session. The session's only writable mountpoints are
+its own
+.I upper
+and
+.I work
+directories, plus shared writable caches
+.RB ( ccache ", " distfiles ", " binpkgs )
+that are intentionally shared with the host so successive sessions amortise
+build cost.
+.PP
+.B compare
+and the matrix runner pin
+.B FEATURES=buildpkg
+on the
+.B emerge
+side to populate
+.IR shared/binpkgs/ ;
+.B portage\-ng
+on the other side respects the same cache via the patched
+.I Source/Config/vm-linux.local.pl
+shipped in the baseline.
+.
+.SH DIAGNOSTICS
+Run
+.B "tinderbox\-ng doctor"
+first when something is unexpectedly broken; it aggregates every host
+prerequisite (kernel module, tools, free space, template existence, default
+profile) into a single report.
+.PP
+.B "tinderbox\-ng status"
+prints global state (paths, pinned tree commit, baseline frozen?, sizes of
+shared caches, sessions) which is the right second step.
+.PP
+Per\-session logs land under
+.I $TINDERBOX_ROOT/sessions/<name>/logs/
+and the script always writes a captured log for every
+.BR exec .
+Compare logs land under
+.I $TINDERBOX_ROOT/logs/compare-<label>-<stamp>/
+and matrix logs under
+.IR $TINDERBOX_ROOT/reports/ .
+.
+.SH SEE ALSO
+.BR deploy-host.sh (8),
+.BR portage (5),
+.BR emerge (1),
+.BR ebuild (5),
+.BR mount (8),
+.BR unshare (1),
+.BR overlayfs (5),
+.BR chroot (1),
+.BR ccache (1),
+.BR git (1),
+.BR rsync (1)
+.PP
+.B portage\-ng
+project: <\fIhttps://github.com/pvdabeel/portage-ng\fR>.
+.PP
+.B tinderbox\-ng
+project: <\fIhttps://github.com/pvdabeel/tinderbox-ng\fR>.
+.
+.SH AUTHOR
+Pieter Van den Abeele
+<\fIpvdabeel@mac.com\fR>.

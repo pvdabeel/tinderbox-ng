@@ -18,28 +18,51 @@ pins the cross-repo contract.
 
 ## Layout
 
+The repository follows FHS conventions: `bin/` for the on-VM CLI entry
+point, `libexec/<name>/` for executable helpers `tinderbox-ng` invokes
+internally, `share/<name>/` for read-only data (templates, manifests,
+manpage), and `contrib/` for dev-machine helpers that never get pushed
+to the VM.
+
 ```text
 tinderbox-ng/
 ├── README.md                          # this file
 ├── LICENSE
-├── bin/
-│   ├── tinderbox-ng                   # main script
-│   └── deploy-host.sh                 # one-shot host install (rsync + symlink + doctor)
-├── share/tinderbox-ng/                # everything cp_template / install touches at bootstrap
-│   ├── baseline.make.conf             # /etc/portage/make.conf for baseline
-│   ├── baseline.package.use           # /etc/portage/package.use/00-tinderbox-ng-defaults
-│   ├── baseline.repos.conf            # /etc/portage/repos.conf/gentoo.conf
-│   ├── portage-ng-dev.in              # in-chroot launcher (template)
-│   ├── deploy-baseline.sh             # safe scp of templates into a live baseline
-│   ├── run-matrix.sh                  # tinderbox-matrix test runner
-│   ├── compare-matrix.sh              # parallel `compare` driver over a manifest
-│   ├── easy-pkgs.sh                   # convenience driver over a curated easy-pkg list
-│   ├── manifest-100.txt               # smoke manifest (100 atoms)
-│   └── manifest-1000.txt              # full matrix manifest (1000 atoms)
-├── tools/
-│   └── render-compare-matrix.py       # render compare-matrix TSVs to Markdown
-└── reports/                           # historical compare-matrix runs (snapshots)
+│
+├── bin/                               # On-VM CLI entry point
+│   └── tinderbox-ng                   #   → /usr/local/sbin/tinderbox-ng (symlinked)
+│
+├── libexec/tinderbox-ng/              # Executable helpers tinderbox-ng calls (not user-facing)
+│   ├── compare-matrix.sh              #   parallel `compare` driver (used by `tinderbox-ng continue`)
+│   ├── compare-merge-emerge.py        #   plan-correctness analyzer (used by `tinderbox-ng analyze`)
+│   ├── consolidate-phase-stats.py     #   forecast aggregator (used by `tinderbox-ng phase-stats`)
+│   ├── extract-timing.py              #   wall-clock timing extractor (used by `tinderbox-ng extract-timing`)
+│   └── run-matrix.sh                  #   in-baseline test runner (installed as `tinderbox-matrix`)
+│
+├── share/tinderbox-ng/                # Pure data: templates copied into the baseline + fixtures
+│   ├── baseline.make.conf             #   /etc/portage/make.conf for baseline
+│   ├── baseline.package.use           #   /etc/portage/package.use/00-tinderbox-ng-defaults
+│   ├── baseline.repos.conf            #   /etc/portage/repos.conf/gentoo.conf
+│   ├── portage-ng-dev.in              #   in-chroot launcher (template)
+│   ├── manifest-100.txt               #   smoke manifest (100 atoms)
+│   └── manifest-1000.txt              #   full matrix manifest (1000 atoms)
+│
+├── share/man/man8/
+│   └── tinderbox-ng.8                 # manpage (→ /usr/local/share/man/man8/)
+│
+├── contrib/                           # Dev-machine helpers (NEVER deployed to the VM)
+│   ├── deploy-host.sh                 #   one-shot host install (rsync + symlink + doctor)
+│   ├── deploy-baseline.sh             #   safe scp of a single template (with @-token substitution)
+│   ├── render-compare-matrix.py       #   render compare-matrix TSVs to Markdown
+│   └── easy-pkgs.sh                   #   small smoke driver over a curated package list
+│
+└── reports/                           # Historical compare-matrix snapshots (Markdown)
 ```
+
+Each script has exactly one home, decided by *who runs it and why*:
+"`tinderbox-ng` runs this internally" → `libexec/`; "I run this on the
+VM" → `bin/`; "I run this on my dev machine" → `contrib/`; "this is
+data, not code" → `share/`.
 
 After `bootstrap`, the rig populates the VM as:
 
@@ -70,28 +93,31 @@ for `ts(1)` (optional — falls back to plain `tee`).
 in one pass; `bootstrap` runs it implicitly so a missing tool surfaces *before*
 stage3 download.
 
-### Recommended: `deploy-host.sh` (one-shot)
+### Recommended: `contrib/deploy-host.sh` (one-shot)
 
 ```sh
 # From your dev machine - first-time install on a fresh VM (long: ~hours):
 TINDERBOX_BOOTSTRAP_SELFTEST=1 \
-  bin/deploy-host.sh --bootstrap root@vm-linux.local
+  contrib/deploy-host.sh --bootstrap root@vm-linux.local
 
 # After `git pull` on the dev machine - refresh script + templates only:
-bin/deploy-host.sh root@vm-linux.local
+contrib/deploy-host.sh root@vm-linux.local
 
 # Refresh script + templates AND push your latest portage-ng src into the
 # already-bootstrapped baseline (does NOT regenerate kb.qlf):
-bin/deploy-host.sh --refresh-portage-ng root@vm-linux.local
+contrib/deploy-host.sh --refresh-portage-ng root@vm-linux.local
 ```
 
 `deploy-host.sh` performs, in order:
 
-1. `rsync` of the entire repo (`bin/`, `share/`, `tools/`; excludes
-   `.git/`, `reports/`, `bin/deploy-host.sh`) to
-   `/usr/local/share/tinderbox-ng/` on the remote.
+1. `rsync` of `bin/`, `libexec/` and `share/` (excludes `.git/`,
+   `reports/`, `contrib/`) to `/usr/local/share/tinderbox-ng/` on the
+   remote.
 2. Symlink `/usr/local/sbin/tinderbox-ng` →
-   `/usr/local/share/tinderbox-ng/bin/tinderbox-ng`.
+   `/usr/local/share/tinderbox-ng/bin/tinderbox-ng`, plus
+   `/usr/local/share/man/man8/tinderbox-ng.8` →
+   `/usr/local/share/tinderbox-ng/share/man/man8/tinderbox-ng.8` (so
+   `man tinderbox-ng` works without extending `MANPATH`).
 3. `tinderbox-ng doctor` on the remote (preflight checks; fails fast on
    missing prerequisites before any heavy work starts).
 4. Optional: `tinderbox-ng bootstrap` (with `--bootstrap`).
@@ -102,13 +128,14 @@ Forwarded environment: `TINDERBOX_CCACHE_MAX_SIZE`,
 `TINDERBOX_SESSIONS_TMPFS_SIZE`, `TINDERBOX_REBOOTSTRAP`, `STAGE3_VARIANT`,
 `STAGE3_ARCH`, `PORTAGE_TREE_PIN`, `GENTOO_PROFILE`,
 `PORTAGE_NG_URL`, `PORTAGE_NG_LOCAL`, `PORTAGE_NG_REF`, etc. — see
-`bin/deploy-host.sh --help` for the full list.
+`contrib/deploy-host.sh --help` for the full list.
 
 ### Manual install (equivalent steps)
 
 ```sh
-# From your dev machine, push the rig to the VM:
-rsync -av --delete --exclude '/.git' --exclude '/reports' \
+# From your dev machine, push the rig to the VM (excluding contrib/, which
+# stays on the dev machine):
+rsync -av --delete --exclude '/.git' --exclude '/reports' --exclude '/contrib' \
   ./ vm-linux.local:/usr/local/share/tinderbox-ng/
 
 # Symlink the entry point onto $PATH:
@@ -120,11 +147,12 @@ ssh vm-linux.local sudo ln -sf \
 ssh vm-linux.local sudo tinderbox-ng doctor
 ```
 
-The script auto-detects `LIB_DIR`: it prefers `share/tinderbox-ng/` next
-to its own `bin/` (works for a dev checkout and the recommended installed
-layout), then falls back to `/usr/local/share/tinderbox-ng/share/tinderbox-ng`
-and finally to a flattened `/usr/local/share/tinderbox-ng/`. Override with
-`TINDERBOX_LIB_DIR`.
+The script auto-detects two install dirs: `LIBEXEC_DIR` (executable
+helpers) and `SHARE_DIR` (data templates), defaulting to
+`../libexec/tinderbox-ng/` and `../share/tinderbox-ng/` relative to the
+script's `bin/`. Override per bucket with `TINDERBOX_LIBEXEC_DIR` and
+`TINDERBOX_SHARE_DIR`. The legacy single-bucket `TINDERBOX_LIB_DIR`
+still works (maps to both) for pre-reorg flat installs.
 
 ## Lifecycle
 
@@ -414,9 +442,39 @@ The summary table contrasts:
   session's upper VDB (`var/db/pkg`)
 - **VDB delta**: which packages only one side merged
 
-Logs land in `/srv/tinderbox-ng/logs/compare-<label>-<stamp>/` as
-`portage-ng.log` and `emerge.log`. With `--keep`, the upper layer of
-each session is preserved at
+Logs land in `/srv/tinderbox-ng/logs/compare-<label>-<stamp>/` and are
+split per engine into a plan log (resolver output) and a build log
+(execution output):
+
+* `portage-ng.plan.log` + `portage-ng.plan.log.exit` (always present)
+* `portage-ng.build.log` + `portage-ng.build.log.exit` (only in `--build`
+  mode, and only if the plan pass succeeded)
+* `emerge.plan.log` + `emerge.plan.log.exit` (always present)
+* `emerge.build.log` + `emerge.build.log.exit` (only in `--build` mode,
+  and only if the plan pass succeeded)
+
+The plan log is exactly the `--pretend` output (i.e. `emerge -vp
+--oneshot`-equivalent for emerge, `portage-ng-dev --mode standalone --ci
+--pretend` for portage-ng); the build log is the same engine without
+`--pretend`. Absence of `<engine>.build.log` signals the plan pass
+failed and the build pass was skipped.
+
+Build pass also salvages target-only artefacts (regardless of success):
+
+* `portage-ng.target.<cat_pn>.build.log` — portage-ng's per-ebuild log
+  for the target, copied out of the session's
+  `/var/tmp/portage-ng/logs/` (config:build_log_dir).
+* `emerge.target.<cat_pn>.build.log[.gz]` — Portage's per-ebuild log
+  for the target. We export `PORTAGE_LOGDIR=/var/log/portage` for the
+  build pass so this file survives `FEATURES=clean`'s workdir wipe on
+  successful merges.
+* `phase_stats.pl` — portage-ng's accumulated per-phase byte and
+  wall-clock counts (`ebuild_exec:phase_stats_file`), salvaged from
+  `/opt/portage-ng/Knowledge/` on the session's upper layer.
+
+Multi-target compares produce one target build log per target per
+engine; single-target produces one file per engine. With `--keep`, the
+upper layer of each session is preserved at
 `/srv/tinderbox-ng/sessions/pkg-cmp-{portage-ng,emerge}-<label>/upper/`.
 
 Exit code: `0` if both succeeded, `1` if exactly one failed, `2` if both
@@ -490,6 +548,143 @@ script ad-hoc snapshots:
 ssh root@vm-linux.local tinderbox-ng progress --once
 ```
 
+### Plan-correctness analysis: `tinderbox-ng analyze`
+
+```sh
+sudo tinderbox-ng analyze                       # latest matrix run
+sudo tinderbox-ng analyze --run /srv/tinderbox-ng/reports/compare-matrix-...
+sudo tinderbox-ng analyze --logdir /srv/tinderbox-ng/logs   # any compare-* dir
+sudo tinderbox-ng analyze --md5-cache /srv/tinderbox-ng/baseline/var/db/repos/gentoo/metadata/md5-cache
+```
+
+After a `compare-matrix` run finishes you have a `results.tsv` (binary
+pass/fail) plus 19k+ pairs of `portage-ng.plan.log` / `emerge.plan.log`
+files (one pair per package, in `/srv/tinderbox-ng/logs/compare-*-<stamp>/`).
+`tinderbox-ng analyze` feeds those pairs through
+`libexec/tinderbox-ng/compare-merge-emerge.py` and produces:
+
+- **Set agreement** (Jaccard at CN, CN+V, CN+V+U granularity) — how
+  often the two resolvers select the same packages, with and without
+  matching version + USE flags.
+- **Ordering** — Kendall tau concordance and Spearman ρ over the per-plan
+  package order, restricted to the common-CN intersection.
+- **Dependency-aware** (with `--md5-cache`) — Kendall tau restricted to
+  pairs with an actual build-dependency edge (`DepConc%`), plus a
+  self-consistency check on the merge plan (`Viol%`: how many times a
+  build dep appears later than its dependent in portage-ng's plan).
+- **Wave-based inversion classification** — every ordering disagreement
+  with Portage is classified as `within_wave` (provably independent),
+  `cross_wave_merge_confirmed`, `cross_wave_emerge_confirmed`, or
+  `cross_wave_no_edge`.
+- **Domain assumptions / blockers / cycle breaks** — aggregated
+  `KNOWN_TREE_CONFLICTS` are tracked separately as
+  `tree_conflict_assumptions`. `install_only_cycle_breaks` flags
+  scheduler cycle breaks where every action is `:install` (suspect).
+- **Download set agreement** — Jaccard between merge plan and any
+  `.fetchonly` sibling.
+- **Timing** — wall-clock per pair, distribution stats, and which
+  resolver was faster.
+
+Output lands in the source dir (defaults to the matrix run dir):
+
+- `analysis.json` — full structured metrics dump (use `jq` to drill in)
+- `analysis.txt`  — captured stdout summary (the line-oriented overview)
+
+`--target-regex` restricts to a subset of pairs by label; `--full-lists`
+includes per-pair missing/extra/use-mismatch lists in the JSON (much
+larger output, but enables CN-level gap analysis).
+
+### Build-time forecasting: `tinderbox-ng phase-stats`
+
+```sh
+sudo tinderbox-ng phase-stats                       # latest matrix run, median
+sudo tinderbox-ng phase-stats --run /srv/tinderbox-ng/reports/compare-matrix-...
+sudo tinderbox-ng phase-stats --src /srv/tinderbox-ng/logs --aggregator p75
+sudo tinderbox-ng phase-stats --out /opt/portage-ng/Knowledge/phase_stats.pl
+```
+
+Each `compare --build` session has portage-ng emit a per-session
+`phase_stats.pl` (one `phase_bytes/3` + `phase_seconds/3` fact per
+`(Entry, Phase)`), which `compare` salvages into the per-package compare
+logdir. Across a manifest those files give us many independent
+observations of every phase. `tinderbox-ng phase-stats` walks the source
+tree, aggregates per `(Entry, Phase)` with a configurable function, and
+emits a single master `phase_stats.pl` in the same Prolog format
+portage-ng already consumes (`ebuild_exec:load_phase_stats/0` /
+`ebuild_exec:expected_phase_stats/4`).
+
+Drop the master file in as the next portage-ng instance's
+`Knowledge/phase_stats.pl` to seed its forecast tables — the planner's
+progress estimates and ETA become accurate from the very first build of
+each package, without waiting for it to be (re)built locally first.
+
+Aggregators:
+
+- `median` — default; robust against cold-cache outliers and dirty disks.
+- `mean`   — plain average.
+- `max`    — worst-case envelope; useful for upper-bound progress bars.
+- `p75` / `p90` — slightly/strongly pessimistic forecasts.
+
+`--min-observations N` drops `(Entry, Phase)` buckets with fewer than
+`N` samples (useful when consolidating across heterogeneous fleets).
+`--exclude-glob PAT` skips matching paths during the input scan.
+The output file is excluded from the input scan automatically, so it's
+safe to run in-place.
+
+### Wall-clock timing comparison: `tinderbox-ng extract-timing`
+
+```sh
+sudo tinderbox-ng extract-timing                       # latest matrix run
+sudo tinderbox-ng extract-timing --run /srv/tinderbox-ng/reports/compare-matrix-...
+sudo tinderbox-ng extract-timing --src /srv/tinderbox-ng/logs
+sudo tinderbox-ng extract-timing --session \
+    /srv/tinderbox-ng/logs/compare-app_misc_jq-20260515T143052
+```
+
+Where `analyze` measures plan *correctness* and `phase-stats` aggregates
+phase-level *byte/second* observations for forecasting,
+`extract-timing` measures end-to-end *wall clock*: how long each engine
+actually took to plan and to build. Source data is written by
+`cmd_compare` itself — every pass produces a `<log>.timing` companion
+file with `started=` / `ended=` / `wall_time_ms=` / `rc=` lines, so the
+extractor doesn't need to grep build logs or trust engine-internal
+timing markers (emerge has none, and portage-ng's `--ci` path does not
+emit them either).
+
+The output JSON has one entry per compare session, indexed by recovered
+CPV when extractable from emerge's resolver line, else by session label
+(`cat/pn`):
+
+```json
+{
+  "summary": {
+    "sessions_total": 1000,
+    "portage_ng_build_p50_ms": 28443,
+    "emerge_build_p50_ms": 19200,
+    "build_pn_over_em_p50": 1.48,
+    "pn_build_faster":  73,
+    "em_build_faster": 925,
+    "build_tied":        2
+  },
+  "entries": {
+    "dev-libs/popt-1.19-r1": {
+      "session": "compare-dev-libs_popt-20260515T161353",
+      "portage_ng_plan":  {"started": ..., "wall_time_ms": 4123, "rc": 0},
+      "portage_ng_build": {"started": ..., "wall_time_ms": 28443, "rc": 0},
+      "emerge_plan":      {"started": ..., "wall_time_ms": 1820, "rc": 0},
+      "emerge_build":     {"started": ..., "wall_time_ms": 19200, "rc": 0},
+      "ratios": {"plan_pn_over_em": 2.27, "build_pn_over_em": 1.48},
+      "phase_stats": {"compile": {"seconds": 14.2, "bytes": 1024000}, ...}
+    }
+  }
+}
+```
+
+Older sessions (predating the per-pass `.timing` capture) reconstruct
+wall time from each log file's ctime/mtime delta and are flagged with
+`mtime_estimated: true`, so consumers know to treat those values as
+approximate.
+
 ## Safety guarantees
 
 - **Read-only Portage tree in sessions.** `mount_session` does the
@@ -535,7 +730,7 @@ ssh root@vm-linux.local tinderbox-ng progress --once
   baseline either** — that bypasses the `cp_template` substitution and
   leaves literal `@NPROC@` placeholders in `make.conf`, crashing emerge
   with `Invalid --jobs parameter: '@NPROC@'`. Use
-  `share/tinderbox-ng/deploy-baseline.sh <template> <user@host:remote-path>`
+  `contrib/deploy-baseline.sh <template> <user@host:remote-path>`
   to push a template into a running baseline; it applies the same
   substitution as `cp_template` and refuses to deploy if any `@TOKEN@`
   is left unresolved. If you discover a baseline whose `make.conf` still
@@ -588,14 +783,12 @@ ships a particular `kb.qlf`, the resolver disagrees with `emerge`.
 
 ## Out of scope (tracked)
 
-- **Compare pipeline integration.** `portage-ng` ships
-  `Reports/Scripts/generate-emerge-files.sh` and
-  `Reports/Scripts/compare-merge-emerge.py` to compare `.merge` vs
-  `.emerge` files. The shell driver hard-codes macOS prefix paths
-  (`/Volumes/...`); a Linux/in-chroot port that calls `emerge -vp`
-  directly is needed before the `.merge`/`.emerge` pipeline can run on
-  the tinderbox VM. Both file types would then land in
-  `/root/Graph/portage/` inside the session.
+- **Compare pipeline integration.** Done — vendored as `tinderbox-ng
+  analyze` (plan correctness, `libexec/tinderbox-ng/compare-merge-emerge.py`)
+  and `tinderbox-ng extract-timing` (wall-clock,
+  `libexec/tinderbox-ng/extract-timing.py`). Both consume per-session
+  compare logs directly and no longer require the legacy `.merge` /
+  `.emerge` graph layout.
 - **Optional `dev-util/pkgcore` cross-resolver** as a third opinion
   alongside `emerge` and `portage-ng-dev`.
 - **A/B baselines** (e.g. multilib vs no-multilib in two parallel

@@ -78,22 +78,25 @@ PORTAGE_NG_URL="${PORTAGE_NG_URL:-}"
 PORTAGE_NG_LOCAL="${PORTAGE_NG_LOCAL:-$(_pn_autodetect)}"
 PORTAGE_NG_REF="${PORTAGE_NG_REF:-HEAD}"
 
-# Library / template directory. The repo layout is bin/tinderbox-ng next
-# to share/tinderbox-ng/, so $SCRIPT_DIR/../share/tinderbox-ng works for
-# both a dev checkout and the standard installed layout produced by
-# deploy-host.sh (entire repo rsynced under /usr/local/share/tinderbox-ng/,
-# entry point symlinked at /usr/local/sbin/tinderbox-ng). Override with
-# TINDERBOX_LIB_DIR for non-standard installs.
-LIB_DIR="${TINDERBOX_LIB_DIR:-$SCRIPT_DIR/../share/tinderbox-ng}"
-if [[ ! -d "$LIB_DIR" ]] && [[ -d /usr/local/share/tinderbox-ng/share/tinderbox-ng ]]; then
-  LIB_DIR=/usr/local/share/tinderbox-ng/share/tinderbox-ng
-fi
-if [[ ! -d "$LIB_DIR" ]] && [[ -d /usr/local/share/tinderbox-ng ]] \
-   && [[ -f /usr/local/share/tinderbox-ng/baseline.make.conf ]]; then
-  # FHS-style install: bin/tinderbox-ng under /usr/local/bin and
-  # templates flattened directly under /usr/local/share/tinderbox-ng.
-  LIB_DIR=/usr/local/share/tinderbox-ng
-fi
+# Library + share directories. The canonical layout is "the repo, copied
+# verbatim under one prefix":
+#
+#   <prefix>/bin/tinderbox-ng              ← entry point (this script)
+#   <prefix>/libexec/tinderbox-ng/         ← executable helpers tinderbox-ng invokes
+#   <prefix>/share/tinderbox-ng/           ← read-only data: templates + manifests
+#   <prefix>/share/man/man8/tinderbox-ng.8 ← manpage
+#
+# Both dev checkouts and deploy-host.sh produce that structure, so the
+# default resolution is just "../{libexec,share}/tinderbox-ng" relative
+# to bin/. Override per-bucket with TINDERBOX_LIBEXEC_DIR or
+# TINDERBOX_SHARE_DIR. The legacy single-bucket TINDERBOX_LIB_DIR is
+# honoured for backward compatibility - it maps to both new variables,
+# which works for pre-reorg installs that flattened everything into one
+# directory.
+_default_libexec_dir="$SCRIPT_DIR/../libexec/tinderbox-ng"
+_default_share_dir="$SCRIPT_DIR/../share/tinderbox-ng"
+LIBEXEC_DIR="${TINDERBOX_LIBEXEC_DIR:-${TINDERBOX_LIB_DIR:-$_default_libexec_dir}}"
+SHARE_DIR="${TINDERBOX_SHARE_DIR:-${TINDERBOX_LIB_DIR:-$_default_share_dir}}"
 
 # Profile + locale (must match Source/config.pl:96 and what the baseline runs)
 GENTOO_PROFILE="${GENTOO_PROFILE:-default/linux/amd64/23.0/split-usr/no-multilib}"
@@ -211,19 +214,27 @@ TINDERBOX_OPTIONAL_BINS=(
   getent      # used to resolve mDNS hosts; falls back silently
 )
 
-# Required template files under $LIB_DIR (everything cp_template / install
-# touches at bootstrap time, plus the matrix harness pieces). Missing any of
-# these will silently break a downstream command.
+# Required data files under $SHARE_DIR (templates copied into the baseline
+# at bootstrap time, plus the manifests the matrix harness consumes).
+# Missing any of these will silently break a downstream command.
 TINDERBOX_REQUIRED_TEMPLATES=(
   baseline.make.conf
   baseline.package.use
   baseline.repos.conf
   portage-ng-dev.in
-  run-matrix.sh
-  compare-matrix.sh
   manifest-100.txt
   manifest-1000.txt
-  deploy-baseline.sh
+)
+
+# Required executable helpers under $LIBEXEC_DIR (scripts tinderbox-ng
+# invokes itself, or installs into the baseline). Missing any of these
+# will silently break a downstream command.
+TINDERBOX_REQUIRED_HELPERS=(
+  run-matrix.sh
+  compare-matrix.sh
+  compare-merge-emerge.py
+  consolidate-phase-stats.py
+  extract-timing.py
 )
 
 # Minimum disk-space hints (in MiB) for $TINDERBOX_ROOT before bootstrap.
@@ -570,18 +581,31 @@ cmd_doctor() {
     fail=$((fail+1))
   fi
 
-  # Templates present (LIB_DIR resolution)
+  # Data templates present (SHARE_DIR resolution)
   local missing_tpl=()
   local t
   for t in "${TINDERBOX_REQUIRED_TEMPLATES[@]}"; do
-    [[ -f "$LIB_DIR/$t" ]] || missing_tpl+=("$t")
+    [[ -f "$SHARE_DIR/$t" ]] || missing_tpl+=("$t")
   done
   if (( ${#missing_tpl[@]} > 0 )); then
-    log_error "missing templates under $LIB_DIR: ${missing_tpl[*]}"
-    log_error "  re-run host install (deploy-host.sh) or rsync the .d directory"
+    log_error "missing templates under $SHARE_DIR: ${missing_tpl[*]}"
+    log_error "  re-run host install (contrib/deploy-host.sh)"
     fail=$((fail+1))
   else
-    log_ok "all templates present in $LIB_DIR"
+    log_ok "all templates present in $SHARE_DIR"
+  fi
+
+  # Executable helpers present (LIBEXEC_DIR resolution)
+  local missing_helpers=()
+  for t in "${TINDERBOX_REQUIRED_HELPERS[@]}"; do
+    [[ -f "$LIBEXEC_DIR/$t" ]] || missing_helpers+=("$t")
+  done
+  if (( ${#missing_helpers[@]} > 0 )); then
+    log_error "missing helpers under $LIBEXEC_DIR: ${missing_helpers[*]}"
+    log_error "  re-run host install (contrib/deploy-host.sh)"
+    fail=$((fail+1))
+  else
+    log_ok "all helpers present in $LIBEXEC_DIR"
   fi
 
   # PORTAGE_NG_LOCAL or PORTAGE_NG_URL must point somewhere
@@ -1103,14 +1127,14 @@ EOF
           "$PORTAGE_NG_LOCAL/" "$BASELINE_DIR$CHROOT_PORTAGE_NG/"
   fi
 
-  install -m 0755 "$LIB_DIR/portage-ng-dev.in" "$BASELINE_DIR/usr/local/bin/portage-ng-dev"
+  install -m 0755 "$SHARE_DIR/portage-ng-dev.in" "$BASELINE_DIR/usr/local/bin/portage-ng-dev"
   sed -i "s|@PORTAGE_NG_ROOT@|$CHROOT_PORTAGE_NG|g" \
       "$BASELINE_DIR/usr/local/bin/portage-ng-dev"
 
   install -d "$BASELINE_DIR$CHROOT_PORTAGE_NG/Source/Knowledge/Sets/world"
   : >"$BASELINE_DIR$CHROOT_PORTAGE_NG/Source/Knowledge/Sets/world/vm-linux.local"
 
-  install -m 0755 "$LIB_DIR/run-matrix.sh" "$BASELINE_DIR/usr/local/bin/tinderbox-matrix"
+  install -m 0755 "$LIBEXEC_DIR/run-matrix.sh" "$BASELINE_DIR/usr/local/bin/tinderbox-matrix"
 
   _patch_portage_ng_host_config
 
@@ -1389,10 +1413,10 @@ EOF
   fi
 
   log_info "refreshing in-baseline portage-ng-dev shim and tinderbox-matrix helper"
-  install -m 0755 "$LIB_DIR/portage-ng-dev.in" "$BASELINE_DIR/usr/local/bin/portage-ng-dev"
+  install -m 0755 "$SHARE_DIR/portage-ng-dev.in" "$BASELINE_DIR/usr/local/bin/portage-ng-dev"
   sed -i "s|@PORTAGE_NG_ROOT@|$CHROOT_PORTAGE_NG|g" \
       "$BASELINE_DIR/usr/local/bin/portage-ng-dev"
-  install -m 0755 "$LIB_DIR/run-matrix.sh" "$BASELINE_DIR/usr/local/bin/tinderbox-matrix"
+  install -m 0755 "$LIBEXEC_DIR/run-matrix.sh" "$BASELINE_DIR/usr/local/bin/tinderbox-matrix"
 
   # Re-touch the empty per-host world file so first --pretend doesn't crash
   # on missing-file. This mirrors the equivalent step in
@@ -1700,6 +1724,121 @@ cmd_emerge() {
 #
 # Best-effort: never aborts, always returns 0. Logs the count when >0.
 
+# -----------------------------------------------------------------------------
+# Salvage the target package's per-ebuild build log + portage-ng phase_stats.pl
+# -----------------------------------------------------------------------------
+#
+# Each engine writes a per-ebuild log file independent of its session-wide
+# log:
+#   * emerge       /var/log/portage/<cat>:<pf>:<timestamp>.log[.gz]
+#                  (only when PORTAGE_LOGDIR is set; the build pass below
+#                  exports PORTAGE_LOGDIR=/var/log/portage to make this
+#                  happen, otherwise the log lives under /var/tmp/portage
+#                  and is wiped by FEATURES=clean on successful builds)
+#   * portage-ng   /var/tmp/portage-ng/logs/<entry-with-slashes-as-dashes>.log
+#                  (config:build_log_dir, persists regardless of outcome)
+#
+# We only care about the user's *target* package(s), not their dependency
+# closure, so we glob each engine's log dir for files whose basename
+# contains <cat>:<pn>-... or <cat>--<pn>-... and copy the newest match
+# per target out to <logdir>/<engine>.target.<cat_pn>.build.log .
+#
+# portage-ng additionally writes ebuild_exec:phase_stats_file at
+# <cwd>/Knowledge/phase_stats.pl, where <cwd> is /opt/portage-ng (set by
+# the engine command). We salvage that to <logdir>/phase_stats.pl .
+#
+# Best-effort: never aborts, always returns 0.
+
+_compare_salvage_target_buildlog() {
+  local engine="$1" session="$2" dest="$3"; shift 3
+  local upper; upper="$(session_upper "$session")"
+
+  # Engine-specific persistent log dir (only populated by source-build
+  # codepaths; binpkg merges leave nothing here).
+  local primary_root
+  case "$engine" in
+    emerge)     primary_root="$upper/var/log/portage"            ;;
+    portage-ng) primary_root="$upper/var/tmp/portage-ng/logs"    ;;
+    *) return 0 ;;
+  esac
+
+  local n=0 t
+  for t in "$@"; do
+    # Reduce a target atom (=cat/pn-1.0::repo, >=cat/pn-1.0:slot, etc.)
+    # to bare cat/pn so we can match either Portage's `:` filename
+    # convention or portage-ng's `--` slash-replacement.
+    local cp
+    cp="$(printf '%s' "$t" | sed -E 's/^[!~<>=]+//; s/::.*$//; s/:[^/]*$//; s/-[0-9].*$//')"
+    local cat_part="${cp%%/*}"
+    local pn_part="${cp#*/}"
+    [[ -n "$cat_part" && -n "$pn_part" && "$cat_part" != "$pn_part" ]] || continue
+    local safe="${cp//\//_}"
+
+    local found=()
+
+    # 1. Engine-specific persistent log dir (source builds).
+    if [[ -d "$primary_root" ]]; then
+      while IFS= read -r -d '' f; do found+=("$f"); done \
+        < <(find "$primary_root" -maxdepth 1 -type f \( \
+              -name "${cat_part}:${pn_part}-*"     \
+           -o -name "${cat_part}--${pn_part}-*"    \
+           -o -name "${cat_part}--${pn_part}.*"    \
+           \) -print0 2>/dev/null)
+    fi
+
+    # 2. Fallback: Portage's per-package temp build.log. Works for
+    # binpkg merges (which never hit ebuild_exec / PORTAGE_LOGDIR) and
+    # is the universal "what happened during the merge" record. With
+    # FEATURES=clean a successful source merge wipes this, so for
+    # source builds the primary_root file (when present) is the one
+    # that survives -- the fallback only fires for binpkg merges or
+    # for failed source builds whose workdir survives by virtue of the
+    # failure.
+    if (( ${#found[@]} == 0 )); then
+      local pkgroot="$upper/var/tmp/portage/$cat_part"
+      if [[ -d "$pkgroot" ]]; then
+        local pf_dir
+        while IFS= read -r -d '' pf_dir; do
+          local bl="$pf_dir/temp/build.log"
+          [[ -f "$bl" ]] && found+=("$bl")
+        done < <(find "$pkgroot" -mindepth 1 -maxdepth 1 -type d \
+                      -name "${pn_part}-*" -print0 2>/dev/null)
+      fi
+    fi
+
+    (( ${#found[@]} > 0 )) || continue
+
+    # If multiple match (e.g. portage-ng wrote install/run/register as
+    # separate files, or there are slot-rotated copies), keep them all.
+    local f outname
+    for f in "${found[@]}"; do
+      outname="${engine}.target.${safe}.build.log"
+      if (( ${#found[@]} > 1 )); then
+        outname="${engine}.target.${safe}.${f##*/}"
+      fi
+      [[ "$f" == *.gz && "$outname" != *.gz ]] && outname+=".gz"
+      cp -p "$f" "$dest/$outname" 2>/dev/null && n=$((n+1))
+    done
+  done
+
+  if (( n > 0 )); then
+    log_info "  salvaged $n target build.log(s) [$engine] → $dest"
+  fi
+  return 0
+}
+
+_compare_salvage_phase_stats() {
+  local session="$1" dest="$2"
+  local src
+  src="$(session_upper "$session")/opt/portage-ng/Knowledge/phase_stats.pl"
+  [[ -f "$src" ]] || return 0
+  cp -p "$src" "$dest/phase_stats.pl" 2>/dev/null || return 0
+  local sz
+  sz="$(stat -c %s "$src" 2>/dev/null || echo '?')"
+  log_info "  salvaged phase_stats.pl ($sz bytes) → $dest"
+  return 0
+}
+
 _compare_salvage_buildlogs() {
   local session="$1" dest="$2"
   local upper pkgroot
@@ -1761,6 +1900,78 @@ _compare_salvage_buildlogs() {
 # salvaged out of /var/tmp/portage/<cat>/<pf>/temp/ before destroy and
 # stored under <logdir>/build-logs/{portage-ng,emerge}/<cat>/<pf>.build.log.gz
 # so failures retain their root-cause evidence after cleanup.
+#
+# Plan vs. build logs: every invocation runs each engine in --pretend
+# first, and writes the resolver output to <engine>.plan.log (with a
+# .exit sibling). When mode is --build AND the plan pass returned an
+# acceptable rc (0/1/2 for portage-ng, 0 for emerge), the engine is
+# invoked a second time without --pretend; that pass's output goes to
+# <engine>.build.log (with a .exit sibling). The plan pass and build
+# pass each get their own mount namespace but share the session's
+# overlay upper layer, so the build pass starts from the post-plan
+# session state (in practice indistinguishable from a fresh session
+# since --pretend writes nothing of consequence). If the plan pass
+# fails the build pass is skipped; the absence of <engine>.build.log
+# signals "build did not run". This means a --build run produces 4
+# session-wide logs (pn.plan, pn.build, em.plan, em.build); a --pretend
+# run produces 2 (pn.plan, em.plan).
+#
+# Per-target artefacts (--build only): the build pass also salvages
+# each engine's per-ebuild log for the *target* package(s) into
+# <logdir>/{portage-ng,emerge}.target.<cat_pn>.build.log. These come
+# from the engine's persistent log dir (portage-ng's
+# config:build_log_dir, emerge's PORTAGE_LOGDIR=/var/log/portage which
+# we set on the build pass) and survive workdir cleanup, so a
+# successful target's compile log is preserved without disabling
+# FEATURES=clean. portage-ng's phase_stats.pl is salvaged alongside.
+#
+# Per-pass timing: each pass also writes <log>.timing alongside <log>
+# and <log>.exit, with key=value lines:
+#     started=<unix-epoch-seconds>
+#     ended=<unix-epoch-seconds>
+#     wall_time_ms=<integer milliseconds>
+#     rc=<integer>
+# These files are the canonical input for `tinderbox-ng extract-timing`,
+# which aggregates portage-ng vs. emerge wall-clock timings across one
+# or many compare sessions. We capture wall time ourselves rather than
+# relying on engine-internal timing markers because emerge does not
+# emit any (only the legacy graph-mode .emerge wrappers did) and
+# portage-ng's --ci pretend path likewise does not currently emit them.
+
+# _compare_run_pass <log> <session> <command-string>
+#
+# Runs the command in a fresh mount namespace inside the given session,
+# redirecting all output to <log>. Records the command's exit code in
+# <log>.exit and per-pass wall-clock timing in <log>.timing.
+#
+# Returns the underlying command's rc (NOT the unshare rc), preserving
+# the existing acceptable-rc gates (portage-ng: 0/1/2; emerge: 0) the
+# build pass uses to decide whether to fire.
+_compare_run_pass() {
+  local log="$1" sess="$2" cmd="$3"
+  local t0 t1
+  # date +%s.%N gives nanosecond-precision Unix epoch with a literal
+  # '.' separator (locale-independent), unlike bash's $EPOCHREALTIME.
+  t0="$(date +%s.%N)"
+  unshare --mount --propagation=private -- \
+    "$0" __ns-helper session "$sess" /bin/bash -l -c "$cmd" \
+    >"$log" 2>&1
+  local rc=$?
+  t1="$(date +%s.%N)"
+  printf '%d\n' "$rc" >"$log.exit"
+  # awk handles the float arithmetic that bash can't (bash integers
+  # overflow if we naively multiply nanoseconds by 1000). Output is
+  # always integer ms; sub-millisecond passes round to 0.
+  awk -v t0="$t0" -v t1="$t1" -v rc="$rc" '
+    BEGIN {
+      printf "started=%d\n",       t0
+      printf "ended=%d\n",         t1
+      printf "wall_time_ms=%d\n",  (t1 - t0) * 1000
+      printf "rc=%d\n",            rc
+    }
+  ' >"$log.timing"
+  return "$rc"
+}
 
 cmd_compare() {
   require_root
@@ -1810,15 +2021,28 @@ cmd_compare() {
   local logdir="$LOG_DIR/compare-$label-$(date +%Y%m%dT%H%M%S)"
   install -d "$logdir"
 
-  local pn_log="$logdir/portage-ng.log"
-  local em_log="$logdir/emerge.log"
+  local pn_plan_log="$logdir/portage-ng.plan.log"
+  local pn_build_log="$logdir/portage-ng.build.log"
+  local em_plan_log="$logdir/emerge.plan.log"
+  local em_build_log="$logdir/emerge.build.log"
 
   log_info "  running both engines in parallel (logs: $logdir)"
 
-  local pn_cmd="cd /opt/portage-ng && timeout ${TINDERBOX_BUILD_TIMEOUT:-7200} ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci $mode $target"
-  local em_pretend_flag=""
-  [[ "$mode" == "--pretend" ]] && em_pretend_flag="--pretend"
-  local em_cmd="timeout ${TINDERBOX_BUILD_TIMEOUT:-7200} /usr/bin/emerge --color=n --oneshot --verbose $em_pretend_flag $target"
+  # Plan pass always runs --pretend regardless of the requested mode;
+  # the build pass (only invoked when mode=--build and the plan pass
+  # succeeded) runs without --pretend. Splitting the two passes lets
+  # us archive the resolver output and the build output separately,
+  # which is exactly what an operator wants when triaging a build
+  # failure: was it the plan that diverged, or the execution?
+  local TO="${TINDERBOX_BUILD_TIMEOUT:-7200}"
+  local pn_plan_cmd="cd /opt/portage-ng && timeout $TO ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci --pretend $target"
+  local pn_build_cmd="cd /opt/portage-ng && timeout $TO ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci --build $target"
+  local em_plan_cmd="timeout $TO /usr/bin/emerge --color=n --oneshot --verbose --pretend $target"
+  # PORTAGE_LOGDIR=/var/log/portage makes Portage retain a per-ebuild log
+  # at /var/log/portage/<cat>:<pf>:<ts>.log even when FEATURES=clean wipes
+  # the build temp dir on successful merge. _compare_salvage_target_buildlog
+  # picks the target's log out of there before the session is destroyed.
+  local em_build_cmd="PORTAGE_LOGDIR=/var/log/portage timeout $TO /usr/bin/emerge --color=n --oneshot --verbose $target"
 
   # Forks; we don't use cmd_exec here to avoid its `exit` at the end
   # (we want both halves to finish and then summarize).
@@ -1831,19 +2055,29 @@ cmd_compare() {
   # to FAIL(?). portage-ng in particular returns 2 for "plan with
   # domain assumptions" which is a normal outcome, not a crash, so
   # this guard is essential.
+  #
+  # Each engine's subshell runs the plan pass first, then conditionally
+  # the build pass. The build pass uses a fresh mount namespace but
+  # the same session, so it sees the overlay upper layer's post-plan
+  # state (in practice unchanged: --pretend writes nothing of
+  # consequence). The "acceptable rc" gate to proceed differs per
+  # engine: portage-ng treats 0/1/2 as "plan succeeded" (per
+  # .cursorrules), emerge requires rc=0.
   ( set +e
-    unshare --mount --propagation=private -- \
-      "$0" __ns-helper session "$sess_pn" /bin/bash -l -c "$pn_cmd" \
-      >"$pn_log" 2>&1
-    printf '%d\n' $? >"$pn_log.exit"
+    _compare_run_pass "$pn_plan_log" "$sess_pn" "$pn_plan_cmd"
+    pn_plan_rc=$?
+    if [[ "$mode" == "--build" && "$pn_plan_rc" -le 2 ]]; then
+      _compare_run_pass "$pn_build_log" "$sess_pn" "$pn_build_cmd"
+    fi
   ) &
   local pn_pid=$!
 
   ( set +e
-    unshare --mount --propagation=private -- \
-      "$0" __ns-helper session "$sess_em" /bin/bash -l -c "$em_cmd" \
-      >"$em_log" 2>&1
-    printf '%d\n' $? >"$em_log.exit"
+    _compare_run_pass "$em_plan_log" "$sess_em" "$em_plan_cmd"
+    em_plan_rc=$?
+    if [[ "$mode" == "--build" && "$em_plan_rc" -eq 0 ]]; then
+      _compare_run_pass "$em_build_log" "$sess_em" "$em_build_cmd"
+    fi
   ) &
   local em_pid=$!
 
@@ -1853,25 +2087,50 @@ cmd_compare() {
   sweep_session_orphans "$sess_pn"
   sweep_session_orphans "$sess_em"
 
+  # Effective rc per engine: build pass rc if it ran, else plan pass
+  # rc. This collapses the two-pass shape back to a single status for
+  # the summary table and the cmd_compare exit code, while keeping the
+  # split logs for forensic use.
   local pn_rc em_rc
-  pn_rc="$(cat "$pn_log.exit" 2>/dev/null || echo "?")"
-  em_rc="$(cat "$em_log.exit" 2>/dev/null || echo "?")"
+  if [[ -f "$pn_build_log.exit" ]]; then
+    pn_rc="$(cat "$pn_build_log.exit")"
+  else
+    pn_rc="$(cat "$pn_plan_log.exit" 2>/dev/null || echo "?")"
+  fi
+  if [[ -f "$em_build_log.exit" ]]; then
+    em_rc="$(cat "$em_build_log.exit")"
+  else
+    em_rc="$(cat "$em_plan_log.exit" 2>/dev/null || echo "?")"
+  fi
 
-  _compare_summarize "$target" "$mode" "$sess_pn" "$sess_em" "$pn_log" "$em_log" "$pn_rc" "$em_rc" "$logdir"
+  _compare_summarize "$target" "$mode" "$sess_pn" "$sess_em" \
+                     "$pn_plan_log" "$pn_build_log" \
+                     "$em_plan_log" "$em_build_log" \
+                     "$pn_rc" "$em_rc" "$logdir"
 
-  # Salvage Portage per-package build.log files BEFORE destroying the
-  # sessions. Successful builds clean their workdir (FEATURES=clean,
-  # default), so a leftover `<cat>/<pf>/temp/build.log` always signals a
-  # failed package. Without this, the only post-mortem evidence is the
-  # per-engine log we already have, which records the step-level FAIL but
-  # not the underlying compile/configure/install error. We need the latter
-  # to triage shared sub-package failures (e.g. xdg-utils / qt5compat
-  # cascading into multiple top-level fail/fail rows in compare-matrix).
+  # Salvage Portage per-package build.log files for FAILED packages
+  # in the dep closure BEFORE destroying the sessions. Successful builds
+  # clean their workdir (FEATURES=clean, default), so a leftover
+  # `<cat>/<pf>/temp/build.log` always signals a failed package. Without
+  # this, the only post-mortem evidence is the per-engine log we already
+  # have, which records the step-level FAIL but not the underlying
+  # compile/configure/install error. We need the latter to triage shared
+  # sub-package failures (e.g. xdg-utils / qt5compat cascading into
+  # multiple top-level fail/fail rows in compare-matrix).
   #
   # Always run, even with --keep, since copies are cheap and this gives
   # the same post-mortem path regardless of cleanup mode.
   _compare_salvage_buildlogs "$sess_pn" "$logdir/build-logs/portage-ng"
   _compare_salvage_buildlogs "$sess_em" "$logdir/build-logs/emerge"
+
+  # Salvage the *target* package's per-ebuild build log (regardless of
+  # outcome) plus portage-ng's phase_stats.pl. These come from each
+  # engine's persistent log directory, not from /var/tmp/portage, so
+  # they survive successful merges. Skipped automatically when no build
+  # pass ran (e.g. mode=--pretend).
+  _compare_salvage_target_buildlog portage-ng "$sess_pn" "$logdir" "${positional[@]}"
+  _compare_salvage_target_buildlog emerge     "$sess_em" "$logdir" "${positional[@]}"
+  _compare_salvage_phase_stats               "$sess_pn" "$logdir"
 
   if [[ $keep -eq 0 ]]; then
     log_info "  cleaning up sessions (use --keep to preserve)"
@@ -1893,11 +2152,18 @@ cmd_compare() {
 
 # Internal: render a side-by-side comparison summary.
 #
-# Pulls a few key signals out of each engine's log:
+# Pulls a few key signals out of each engine's logs:
 #   - exit code (success vs failure)
-#   - planner verdict (count of actions or "unable to satisfy")
-#   - ebuilds actually installed/registered (parsed from VDB after build)
-#   - first failed phase / first error keyword
+#   - planner verdict (count of actions / packages from the plan log)
+#   - ebuilds actually installed/registered (parsed from VDB after build,
+#     and from the build log's completion markers)
+#   - first failed phase / first error keyword (build log preferred,
+#     plan log fallback)
+#
+# Logs come in pairs per engine: <engine>.plan.log (always present)
+# and <engine>.build.log (only present when mode=--build AND the plan
+# pass succeeded). Counters that describe the plan come from the plan
+# log; counters that describe execution come from the build log.
 #
 # Output is plain stdout so it's easy to redirect or pipe to less.
 _compare_summarize() {
@@ -1905,9 +2171,10 @@ _compare_summarize() {
   set +e
   local target="$1" mode="$2"
   local sess_pn="$3" sess_em="$4"
-  local pn_log="$5" em_log="$6"
-  local pn_rc="$7" em_rc="$8"
-  local logdir="$9"
+  local pn_plan_log="$5" pn_build_log="$6"
+  local em_plan_log="$7" em_build_log="$8"
+  local pn_rc="$9" em_rc="${10}"
+  local logdir="${11}"
 
   # portage-ng exit-code semantics (per .cursorrules):
   #   0 = no assumptions
@@ -1928,27 +2195,38 @@ _compare_summarize() {
   # portage-ng renders with ANSI color codes, so we strip them before matching.
   # ESC[...m sequences appear around numbers in lines like "Total: \e[32m16\e[00m completed."
   local _strip='s/\x1b\[[0-9;]*[a-zA-Z]//g'
-  local pn_clean em_clean
-  pn_clean="$(sed -E "$_strip" "$pn_log" 2>/dev/null)"
-  em_clean="$(sed -E "$_strip" "$em_log" 2>/dev/null)"
+  local pn_plan_clean em_plan_clean pn_build_clean em_build_clean
+  pn_plan_clean="$(sed -E "$_strip" "$pn_plan_log" 2>/dev/null)"
+  em_plan_clean="$(sed -E "$_strip" "$em_plan_log" 2>/dev/null)"
+  pn_build_clean=""
+  em_build_clean=""
+  [[ -f "$pn_build_log" ]] && pn_build_clean="$(sed -E "$_strip" "$pn_build_log" 2>/dev/null)"
+  [[ -f "$em_build_log" ]] && em_build_clean="$(sed -E "$_strip" "$em_build_log" 2>/dev/null)"
 
+  # Plan-side counters come from the plan log.
   # portage-ng's plan: "Total: N actions" line; emerge: "Total: N packages"
   local pn_plan_actions em_plan_actions
-  pn_plan_actions="$(printf '%s\n' "$pn_clean" | grep -oE 'Total:[[:space:]]*[0-9]+ actions?' | tail -n1 | grep -oE '[0-9]+')"
-  em_plan_actions="$(printf '%s\n' "$em_clean" | grep -oE 'Total:[[:space:]]*[0-9]+ packages?' | tail -n1 | grep -oE '[0-9]+')"
+  pn_plan_actions="$(printf '%s\n' "$pn_plan_clean" | grep -oE 'Total:[[:space:]]*[0-9]+ actions?' | tail -n1 | grep -oE '[0-9]+')"
+  em_plan_actions="$(printf '%s\n' "$em_plan_clean" | grep -oE 'Total:[[:space:]]*[0-9]+ packages?' | tail -n1 | grep -oE '[0-9]+')"
   [[ -z "$pn_plan_actions" ]] && pn_plan_actions="?"
   [[ -z "$em_plan_actions" ]] && em_plan_actions="?"
 
+  # Execution-side counters come from the build log; absent in --pretend
+  # mode (or when plan failed and build was skipped) -> 0.
   local pn_completed em_completed
-  pn_completed="$(printf '%s\n' "$pn_clean" | grep -oE 'Total:[[:space:]]*[0-9]+ completed' | tail -n1 | grep -oE '[0-9]+')"
+  pn_completed="$(printf '%s\n' "$pn_build_clean" | grep -oE 'Total:[[:space:]]*[0-9]+ completed' | tail -n1 | grep -oE '[0-9]+')"
   [[ -z "$pn_completed" ]] && pn_completed=0
-  em_completed="$(printf '%s\n' "$em_clean" | grep -cE '^>>> Completed')"
+  em_completed="$(printf '%s\n' "$em_build_clean" | grep -cE '^>>> Completed')"
   [[ -z "$em_completed" ]] && em_completed=0
 
   # First error / failure marker, trimmed (use stripped-ANSI version).
+  # Prefer the build log (where real execution failures live) over the
+  # plan log (which usually only errors on unsatisfiable resolves).
   local pn_first_err em_first_err
-  pn_first_err="$(printf '%s\n' "$pn_clean" | grep -m1 -iE '\b(error|fail|aborting|REQUIRED_USE|unmet|unsatisfied)' | head -c 200)"
-  em_first_err="$(printf '%s\n' "$em_clean" | grep -m1 -iE '\b(error|fail|aborting|REQUIRED_USE|unmet|unsatisfied)' | head -c 200)"
+  pn_first_err="$(printf '%s\n' "$pn_build_clean" | grep -m1 -iE '\b(error|fail|aborting|REQUIRED_USE|unmet|unsatisfied)' | head -c 200)"
+  [[ -z "$pn_first_err" ]] && pn_first_err="$(printf '%s\n' "$pn_plan_clean" | grep -m1 -iE '\b(error|fail|aborting|REQUIRED_USE|unmet|unsatisfied)' | head -c 200)"
+  em_first_err="$(printf '%s\n' "$em_build_clean" | grep -m1 -iE '\b(error|fail|aborting|REQUIRED_USE|unmet|unsatisfied)' | head -c 200)"
+  [[ -z "$em_first_err" ]] && em_first_err="$(printf '%s\n' "$em_plan_clean" | grep -m1 -iE '\b(error|fail|aborting|REQUIRED_USE|unmet|unsatisfied)' | head -c 200)"
 
   # Final installed CPV list from each session's VDB upper layer
   local pn_vdb em_vdb
@@ -2015,7 +2293,27 @@ _compare_summarize() {
     fi
   fi
 
-  printf '\nFull logs:\n  portage-ng: %s\n  emerge    : %s\n\n' "$pn_log" "$em_log"
+  printf '\nFull logs:\n'
+  printf '  portage-ng plan : %s\n'  "$pn_plan_log"
+  [[ -f "$pn_build_log" ]] && printf '  portage-ng build: %s\n' "$pn_build_log"
+  printf '  emerge     plan : %s\n'  "$em_plan_log"
+  [[ -f "$em_build_log" ]] && printf '  emerge     build: %s\n' "$em_build_log"
+
+  # Surface target-only artefacts (per-ebuild build logs + phase_stats.pl)
+  # when present. Listed separately from the session-wide logs above so
+  # the operator can grab them quickly without globbing the dir.
+  local tgt_n=0 tgt
+  for tgt in "$logdir"/portage-ng.target.*.build.log* "$logdir"/emerge.target.*.build.log*; do
+    [[ -f "$tgt" ]] || continue
+    if (( tgt_n == 0 )); then printf '\nTarget per-ebuild logs:\n'; fi
+    printf '  %s\n' "$tgt"
+    tgt_n=$((tgt_n+1))
+  done
+  if [[ -f "$logdir/phase_stats.pl" ]]; then
+    printf '\nportage-ng phase_stats.pl: %s\n' "$logdir/phase_stats.pl"
+  fi
+
+  printf '\n'
   set -e
 }
 
@@ -2206,12 +2504,12 @@ CONT_HELP
     return 0
   fi
 
-  local cm="$LIB_DIR/compare-matrix.sh"
+  local cm="$LIBEXEC_DIR/compare-matrix.sh"
   if [[ ! -x "$cm" ]]; then
     if [[ -x /usr/local/sbin/compare-matrix ]]; then
       cm="/usr/local/sbin/compare-matrix"
     else
-      die "compare-matrix script not found (looked at $LIB_DIR/compare-matrix.sh and /usr/local/sbin/compare-matrix)"
+      die "compare-matrix script not found (looked at $LIBEXEC_DIR/compare-matrix.sh and /usr/local/sbin/compare-matrix)"
     fi
   fi
 
@@ -3015,6 +3313,554 @@ PROGRESS_HELP
 }
 
 # =============================================================================
+# Subcommand: analyze
+# =============================================================================
+#
+# Run plan-correctness analysis on a matrix run (or any directory of
+# compare-<label>-<stamp>/ logdirs). Wraps share/tinderbox-ng/compare-merge-
+# emerge.py: feeds it a transient symlink tree where <label>.merge points at
+# each pair's portage-ng.plan.log and <label>.emerge points at the emerge
+# .plan.log, then captures the JSON + stdout summary into the source dir.
+#
+# Inputs (in priority order):
+#   --run DIR     matrix run dir (default: most-recent compare-matrix-*
+#                 under $REPORTS_DIR_DEFAULT). Per-pkg compare logdirs are
+#                 discovered from each <label>.log wrapper file's "logs:"
+#                 line.
+#   --logdir DIR  treat DIR as a flat container of compare-*-<stamp>/
+#                 subdirs and pair every one of them. Use this for ad-hoc
+#                 sets, e.g. --logdir /srv/tinderbox-ng/logs to analyze
+#                 every compare ever run.
+#
+# Output (default):
+#   <source>/analysis.json   full JSON metrics dump
+#   <source>/analysis.txt    captured stdout summary
+#
+# The analyzer is platform-agnostic Python 3 (stdlib only). It runs on
+# the host outside any chroot — it just reads files.
+#
+# Pass-throughs to the analyzer:
+#   --jobs N              parallel workers (default: nproc/2)
+#   --md5-cache DIR       enable dep-aware metrics (DepConc%, Viol%)
+#                         using a Portage md5-cache tree
+#   --target-regex RE     restrict to pairs whose label matches
+#   --full-lists          include full per-pair missing/extra lists in JSON
+
+cmd_analyze() {
+  require_dirs
+
+  local pinned_run="" alt_logdir="" out_path="" jobs="" md5_cache="" target_regex="" full_lists=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run)            pinned_run="$2"; shift 2 ;;
+      --run=*)          pinned_run="${1#--run=}"; shift ;;
+      --logdir)         alt_logdir="$2"; shift 2 ;;
+      --logdir=*)       alt_logdir="${1#--logdir=}"; shift ;;
+      --out)            out_path="$2"; shift 2 ;;
+      --out=*)          out_path="${1#--out=}"; shift ;;
+      --jobs|-j)        jobs="$2"; shift 2 ;;
+      --jobs=*)         jobs="${1#--jobs=}"; shift ;;
+      --md5-cache)      md5_cache="$2"; shift 2 ;;
+      --md5-cache=*)    md5_cache="${1#--md5-cache=}"; shift ;;
+      --target-regex)   target_regex="$2"; shift 2 ;;
+      --target-regex=*) target_regex="${1#--target-regex=}"; shift ;;
+      --full-lists)     full_lists=1; shift ;;
+      -h|--help)
+        cat <<'ANALYZE_HELP'
+tinderbox-ng analyze [--run DIR | --logdir DIR] [--out FILE]
+                     [--jobs N] [--md5-cache DIR] [--target-regex RE]
+                     [--full-lists]
+
+Run plan-correctness analysis on the per-package portage-ng/emerge plan
+logs produced by `tinderbox-ng compare`. Computes Jaccard set agreement
+(CN / CN+V / CN+V+U), Kendall-tau and Spearman ordering metrics,
+optional dependency-aware concordance + violation rate (with
+--md5-cache), domain assumptions, blockers, cycle breaks, install-only
+cycle breaks, download set agreement, and timing aggregates.
+
+Sources (mutually exclusive):
+  --run DIR        Matrix run dir (compare-matrix-<stamp>/). Default:
+                   most-recent under $REPORTS_DIR_DEFAULT. Per-package
+                   compare logdirs are followed from each <label>.log
+                   wrapper file.
+  --logdir DIR     Flat container of compare-<label>-<stamp>/ subdirs.
+                   Pairs every subdir found.
+
+Output (default <source>/analysis.{json,txt}):
+  --out FILE       JSON output path. The stdout summary is teed next to
+                   it as <basename>.txt.
+
+Pass-throughs to share/tinderbox-ng/compare-merge-emerge.py:
+  --jobs N
+  --md5-cache DIR
+  --target-regex RE
+  --full-lists
+ANALYZE_HELP
+        return 0 ;;
+      *) die "analyze: unknown flag $1" ;;
+    esac
+  done
+
+  if [[ -n "$pinned_run" && -n "$alt_logdir" ]]; then
+    die "analyze: --run and --logdir are mutually exclusive"
+  fi
+
+  # Resolve the analyzer script. LIBEXEC_DIR is the canonical install path
+  # (libexec/tinderbox-ng/ relative to the install prefix);
+  # TINDERBOX_COMPARE_ANALYZER overrides for development/forking.
+  local analyzer="${TINDERBOX_COMPARE_ANALYZER:-$LIBEXEC_DIR/compare-merge-emerge.py}"
+  [[ -f "$analyzer" ]] || die "analyzer script not found: $analyzer"
+  command -v python3 >/dev/null 2>&1 || die "python3 not found in PATH"
+
+  local source_dir="" source_kind=""
+  if [[ -n "$alt_logdir" ]]; then
+    [[ -d "$alt_logdir" ]] || die "logdir not found: $alt_logdir"
+    source_dir="$alt_logdir"; source_kind="logdir"
+  else
+    local reports_dir="${REPORTS_DIR_DEFAULT:-$TINDERBOX_ROOT/reports}"
+    local run="$pinned_run"
+    if [[ -z "$run" ]]; then
+      run="$(find "$reports_dir" -maxdepth 1 -mindepth 1 -type d \
+                  -regextype posix-extended \
+                  -regex ".*/compare-matrix-[0-9]{8}T[0-9]{6}" \
+                  -printf '%T@\t%p\n' 2>/dev/null \
+              | sort -rn | head -n1 | cut -f2-)"
+      [[ -n "$run" ]] || die "no compare-matrix-<stamp> run found under $reports_dir; use --run or --logdir"
+      log_info "auto-detected run: $(basename "$run")"
+    fi
+    [[ -d "$run" ]] || die "run dir not found: $run"
+    source_dir="$run"; source_kind="run"
+  fi
+
+  out_path="${out_path:-$source_dir/analysis.json}"
+  local out_txt="${out_path%.json}.txt"
+
+  # Build the symlink tree the analyzer expects: pairs of <label>.merge
+  # and <label>.emerge files in any directory layout. We pair by the
+  # presence of {portage-ng,emerge}.plan.log inside each compare logdir.
+  local work_dir
+  work_dir="$(mktemp -d)" || die "mktemp failed"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$work_dir'" RETURN
+
+  local pair_count=0 skipped=0
+  local enumerate_logdirs
+  if [[ "$source_kind" == "run" ]]; then
+    # In a matrix run the per-package wrapper log is <label>.log; its
+    # second non-blank line contains "running both engines in parallel
+    # (logs: <abs_path>)". That path is the per-package compare logdir.
+    local wrapper
+    while IFS= read -r -d '' wrapper; do
+      local logdir
+      logdir="$(grep -m1 -oE '/srv/tinderbox-ng/logs/compare-[^ )]+' "$wrapper" 2>/dev/null || true)"
+      [[ -n "$logdir" && -d "$logdir" ]] || { skipped=$((skipped+1)); continue; }
+      local label
+      label="$(basename "$wrapper" .log)"
+      _analyze_link_pair "$label" "$logdir" "$work_dir" \
+        && pair_count=$((pair_count+1)) \
+        || skipped=$((skipped+1))
+    done < <(find "$source_dir" -maxdepth 1 -mindepth 1 -type f -name '*.log' \
+                  ! -name 'all-packages-driver*.log' -print0 2>/dev/null)
+  else
+    # --logdir: walk for compare-*-<stamp>/ subdirs directly.
+    local logdir
+    while IFS= read -r -d '' logdir; do
+      local label
+      label="$(basename "$logdir")"
+      label="${label#compare-}"
+      label="${label%-[0-9]*T[0-9]*}"
+      _analyze_link_pair "$label" "$logdir" "$work_dir" \
+        && pair_count=$((pair_count+1)) \
+        || skipped=$((skipped+1))
+    done < <(find "$source_dir" -maxdepth 1 -mindepth 1 -type d -name 'compare-*' -print0 2>/dev/null)
+  fi
+
+  if (( pair_count == 0 )); then
+    die "no .plan.log pairs found under $source_dir (skipped: $skipped)"
+  fi
+  log_info "analyzing $pair_count pair(s) (skipped: $skipped)"
+
+  local args=("$analyzer" --root "$work_dir" --out "$out_path")
+  [[ -n "$jobs"         ]] && args+=(--jobs "$jobs")
+  [[ -n "$md5_cache"    ]] && args+=(--md5-cache "$md5_cache")
+  [[ -n "$target_regex" ]] && args+=(--target-regex "$target_regex")
+  (( full_lists ))         && args+=(--full-lists)
+
+  log_info "→ python3 $(basename "$analyzer") --root <tmp> --out $out_path"
+  install -d "$(dirname "$out_path")"
+
+  # Capture stdout to <out_path>.txt for archival; mirror to terminal.
+  if python3 "${args[@]}" 2>&1 | tee "$out_txt"; then
+    local rc=${PIPESTATUS[0]}
+    if (( rc == 0 )); then
+      log_ok "analysis complete"
+      log_info "  json: $out_path"
+      log_info "  text: $out_txt"
+      return 0
+    fi
+    return "$rc"
+  fi
+  return 1
+}
+
+# Internal: link a single compare logdir's plan logs into the analyzer
+# work_dir as <label>.merge / <label>.emerge. Returns 1 if either plan
+# log is missing.
+_analyze_link_pair() {
+  local label="$1" logdir="$2" work="$3"
+  local pn="$logdir/portage-ng.plan.log"
+  local em="$logdir/emerge.plan.log"
+  [[ -f "$pn" && -f "$em" ]] || return 1
+  ln -snf "$pn" "$work/${label}.merge"  || return 1
+  ln -snf "$em" "$work/${label}.emerge" || return 1
+  return 0
+}
+
+# =============================================================================
+# tinderbox-ng phase-stats:
+#   consolidate per-session phase_stats.pl files into a master forecasting file
+# =============================================================================
+#
+# Each `tinderbox-ng compare --build` session has portage-ng emit
+# Knowledge/phase_stats.pl with one phase_bytes/3 + phase_seconds/3 fact per
+# (Entry, Phase). cmd_compare salvages it into the per-package compare logdir.
+# Across a manifest (a matrix run, or any directory tree containing many such
+# logdirs) we therefore have N independent observations of every (Entry,
+# Phase) pair. This subcommand walks the source tree, aggregates those
+# observations with a configurable function (default median), and writes a
+# single master phase_stats.pl that can be dropped into a future portage-ng
+# instance as Knowledge/phase_stats.pl to seed its forecasting tables (see
+# ebuild_exec:load_phase_stats/0 and ebuild_exec:expected_phase_stats/4 in
+# the portage-ng source).
+#
+# Inputs (mutually exclusive; default: most-recent compare-matrix-* run):
+#   --run DIR     matrix run dir, e.g. compare-matrix-<stamp>/.
+#   --logdir DIR  flat container of compare-<label>-<stamp>/ subdirs.
+#   --src DIR     arbitrary directory tree to walk for phase_stats.pl files
+#                 (escape hatch for ad-hoc consolidation).
+#
+# Output (default <source>/phase_stats.pl):
+#   --out FILE    explicit master file path.
+#
+# Aggregation:
+#   --aggregator NAME       median (default) | mean | max | p75 | p90.
+#   --min-observations N    drop buckets with fewer than N samples.
+#
+# Pass-through:
+#   --exclude-glob PATTERN  fnmatch pattern (matched against absolute path)
+#                           to skip during the input scan. Repeatable.
+
+cmd_phase_stats() {
+  require_dirs
+
+  local pinned_run="" alt_logdir="" alt_src="" out_path=""
+  local aggregator="" min_obs=""
+  local -a excludes=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run)              pinned_run="$2"; shift 2 ;;
+      --run=*)            pinned_run="${1#--run=}"; shift ;;
+      --logdir)           alt_logdir="$2"; shift 2 ;;
+      --logdir=*)         alt_logdir="${1#--logdir=}"; shift ;;
+      --src)              alt_src="$2"; shift 2 ;;
+      --src=*)            alt_src="${1#--src=}"; shift ;;
+      --out)              out_path="$2"; shift 2 ;;
+      --out=*)            out_path="${1#--out=}"; shift ;;
+      --aggregator)       aggregator="$2"; shift 2 ;;
+      --aggregator=*)     aggregator="${1#--aggregator=}"; shift ;;
+      --min-observations) min_obs="$2"; shift 2 ;;
+      --min-observations=*) min_obs="${1#--min-observations=}"; shift ;;
+      --exclude-glob)     excludes+=("$2"); shift 2 ;;
+      --exclude-glob=*)   excludes+=("${1#--exclude-glob=}"); shift ;;
+      -h|--help)
+        cat <<'PHASE_STATS_HELP'
+tinderbox-ng phase-stats [--run DIR | --logdir DIR | --src DIR] [--out FILE]
+                         [--aggregator median|mean|max|p75|p90]
+                         [--min-observations N]
+                         [--exclude-glob PATTERN ...]
+
+Consolidate the per-session phase_stats.pl files that `tinderbox-ng
+compare --build` salvages into each compare session's log directory
+(<logdir>/phase_stats.pl) into a single master forecasting file that
+portage-ng can load as Knowledge/phase_stats.pl. Aggregates every
+(Entry, Phase) observation across all sessions with a configurable
+function (default: median).
+
+Sources (mutually exclusive):
+  --run DIR        Matrix run dir (compare-matrix-<stamp>/). Default:
+                   most-recent under $REPORTS_DIR_DEFAULT. The wrapper
+                   first looks under the run dir; when no
+                   phase_stats.pl files are found there it falls back
+                   to scanning $LOGS_DIR (where the per-session
+                   compare logdirs actually live).
+  --logdir DIR     Flat container of compare-<label>-<stamp>/ subdirs
+                   (e.g. /srv/tinderbox-ng/logs).
+  --src DIR        Arbitrary directory tree -- escape hatch for
+                   ad-hoc consolidation across machines, archives,
+                   etc. Walked recursively for files literally named
+                   phase_stats.pl.
+
+Output (default <source>/phase_stats.pl):
+  --out FILE       Master file path. Drop in as the next portage-ng
+                   instance's Knowledge/phase_stats.pl.
+
+Aggregation:
+  --aggregator     median (default; robust against cold-cache outliers)
+                   | mean | max (worst-case envelope) | p75 | p90.
+  --min-observations N
+                   Drop (Entry, Phase) buckets with fewer than N
+                   observations (default: 1, keep singletons).
+
+Other:
+  --exclude-glob PATTERN
+                   fnmatch pattern matched against the absolute path of
+                   each candidate input file. Repeatable.
+
+The consolidator is platform-agnostic Python 3 (stdlib only).
+PHASE_STATS_HELP
+        return 0 ;;
+      *) die "phase-stats: unknown flag $1" ;;
+    esac
+  done
+
+  local set_count=0
+  [[ -n "$pinned_run" ]] && set_count=$((set_count+1))
+  [[ -n "$alt_logdir" ]] && set_count=$((set_count+1))
+  [[ -n "$alt_src"    ]] && set_count=$((set_count+1))
+  if (( set_count > 1 )); then
+    die "phase-stats: --run, --logdir and --src are mutually exclusive"
+  fi
+
+  local consolidator="${TINDERBOX_PHASE_STATS_CONSOLIDATOR:-$LIBEXEC_DIR/consolidate-phase-stats.py}"
+  [[ -f "$consolidator" ]] || die "consolidator script not found: $consolidator"
+  command -v python3 >/dev/null 2>&1 || die "python3 not found in PATH"
+
+  local source_dir=""
+  if [[ -n "$alt_src" ]]; then
+    [[ -d "$alt_src" ]] || die "src not found: $alt_src"
+    source_dir="$alt_src"
+  elif [[ -n "$alt_logdir" ]]; then
+    [[ -d "$alt_logdir" ]] || die "logdir not found: $alt_logdir"
+    source_dir="$alt_logdir"
+  else
+    local reports_dir="${REPORTS_DIR_DEFAULT:-$TINDERBOX_ROOT/reports}"
+    local run="$pinned_run"
+    if [[ -z "$run" ]]; then
+      run="$(find "$reports_dir" -maxdepth 1 -mindepth 1 -type d \
+                  -regextype posix-extended \
+                  -regex ".*/compare-matrix-[0-9]{8}T[0-9]{6}" \
+                  -printf '%T@\t%p\n' 2>/dev/null \
+              | sort -rn | head -n1 | cut -f2-)"
+      [[ -n "$run" ]] || die "no compare-matrix-<stamp> run found under $reports_dir; use --run, --logdir or --src"
+      log_info "auto-detected run: $(basename "$run")"
+    fi
+    [[ -d "$run" ]] || die "run dir not found: $run"
+    source_dir="$run"
+
+    # For matrix runs the per-package phase_stats.pl files live under
+    # /srv/tinderbox-ng/logs/compare-<label>-<stamp>/, NOT under the
+    # report dir itself. Switch the walk root to the logs dir but keep
+    # the report dir as the default output destination so the master
+    # file ships with the run's analysis artefacts.
+    if ! find "$source_dir" -maxdepth 4 -type f -name 'phase_stats.pl' \
+           -print -quit 2>/dev/null | grep -q .; then
+      local logs_dir="${LOGS_DIR:-$TINDERBOX_ROOT/logs}"
+      if [[ -d "$logs_dir" ]]; then
+        log_info "no phase_stats.pl under run dir; scanning $logs_dir instead"
+        source_dir="$logs_dir"
+      fi
+    fi
+  fi
+
+  if [[ -z "$out_path" ]]; then
+    if [[ -n "$pinned_run" || ( -z "$alt_logdir" && -z "$alt_src" ) ]]; then
+      # Default for runs: place the master file alongside analysis.{json,txt}.
+      local reports_dir="${REPORTS_DIR_DEFAULT:-$TINDERBOX_ROOT/reports}"
+      local run="${pinned_run:-$(find "$reports_dir" -maxdepth 1 -mindepth 1 -type d \
+                  -regextype posix-extended \
+                  -regex ".*/compare-matrix-[0-9]{8}T[0-9]{6}" \
+                  -printf '%T@\t%p\n' 2>/dev/null \
+              | sort -rn | head -n1 | cut -f2-)}"
+      out_path="$run/phase_stats.pl"
+    else
+      out_path="$source_dir/phase_stats.pl"
+    fi
+  fi
+
+  local args=("$consolidator" --src "$source_dir" --out "$out_path")
+  [[ -n "$aggregator" ]] && args+=(--aggregator "$aggregator")
+  [[ -n "$min_obs"    ]] && args+=(--min-observations "$min_obs")
+  local pat
+  for pat in "${excludes[@]}"; do
+    args+=(--exclude-glob "$pat")
+  done
+
+  log_info "→ python3 $(basename "$consolidator") --src $source_dir --out $out_path"
+  install -d "$(dirname "$out_path")"
+
+  if python3 "${args[@]}"; then
+    log_ok "master phase_stats.pl written"
+    log_info "  master: $out_path"
+    return 0
+  fi
+  return 1
+}
+
+# =============================================================================
+# tinderbox-ng extract-timing:
+#   per-engine, per-phase wall-clock timing across one or many compare sessions
+# =============================================================================
+#
+# `tinderbox-ng compare` writes a <log>.timing file alongside every
+# <engine>.<phase>.log it produces (see _compare_run_pass) with
+# started/ended/wall_time_ms/rc fields. This subcommand walks one or
+# many compare session directories, reads those companion files (with
+# a log mtime/ctime fallback for older sessions that predate
+# _compare_run_pass), optionally merges in the session's phase_stats.pl,
+# and writes a consolidated JSON report comparing portage-ng to emerge.
+#
+# Inputs (mutually exclusive; default: most-recent compare-matrix-* run):
+#   --run DIR      matrix run dir, e.g. compare-matrix-<stamp>/. Each
+#                  per-package wrapper log inside it embeds the absolute
+#                  path of its compare session dir; we follow those.
+#   --logdir DIR   flat container of compare-<label>-<stamp>/ subdirs
+#                  (e.g. /srv/tinderbox-ng/logs).
+#   --src DIR      same as --logdir; provided for API symmetry with
+#                  `analyze` and `phase-stats`.
+#   --session DIR  a single compare-<label>-<stamp>/ directory.
+#
+# Output (default <source>/timing.json):
+#   --out FILE     explicit JSON output path. Sessions index by cpv when
+#                  recoverable, else by label, else by session dirname.
+#
+# The extractor is platform-agnostic Python 3 (stdlib only).
+
+cmd_extract_timing() {
+  require_dirs
+
+  local pinned_run="" alt_logdir="" alt_src="" alt_session="" out_path="" quiet=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run)         pinned_run="$2"; shift 2 ;;
+      --run=*)       pinned_run="${1#--run=}"; shift ;;
+      --logdir)      alt_logdir="$2"; shift 2 ;;
+      --logdir=*)    alt_logdir="${1#--logdir=}"; shift ;;
+      --src)         alt_src="$2"; shift 2 ;;
+      --src=*)       alt_src="${1#--src=}"; shift ;;
+      --session)     alt_session="$2"; shift 2 ;;
+      --session=*)   alt_session="${1#--session=}"; shift ;;
+      --out)         out_path="$2"; shift 2 ;;
+      --out=*)       out_path="${1#--out=}"; shift ;;
+      --quiet)       quiet=1; shift ;;
+      -h|--help)
+        cat <<'EXTRACT_TIMING_HELP'
+tinderbox-ng extract-timing [--run DIR | --logdir DIR | --src DIR | --session DIR]
+                            [--out FILE] [--quiet]
+
+Extract per-engine, per-phase wall-clock timing from `tinderbox-ng compare`
+session log directories and emit a consolidated JSON report comparing
+portage-ng to emerge across one or many sessions. Used to track
+portage-ng's resolver and build performance against the emerge baseline.
+
+Sources (mutually exclusive):
+  --run DIR        Matrix run dir (compare-matrix-<stamp>/). Default:
+                   most-recent under $REPORTS_DIR_DEFAULT. Per-package
+                   compare logdirs are followed from each <label>.log
+                   wrapper file.
+  --logdir DIR     Flat container of compare-<label>-<stamp>/ subdirs.
+  --src DIR        Same as --logdir (symmetry with `analyze` /
+                   `phase-stats`).
+  --session DIR    A single compare session directory.
+
+Output (default <source>/timing.json):
+  --out FILE       JSON output path.
+
+Each session entry contains: started/ended/wall_time_ms/rc per pass
+(portage_ng_plan, portage_ng_build, emerge_plan, emerge_build), pn/em
+ratios, recovered cpv (when available), and per-phase totals from
+phase_stats.pl when present. Summary block aggregates avg/p50/p95/max
+per pass plus head-to-head wins.
+
+Older sessions (before per-pass .timing files were written) reconstruct
+wall time from each log file's ctime/mtime delta and are flagged with
+"mtime_estimated": true.
+
+The extractor is platform-agnostic Python 3 (stdlib only).
+EXTRACT_TIMING_HELP
+        return 0 ;;
+      *) die "extract-timing: unknown flag $1" ;;
+    esac
+  done
+
+  local set_count=0
+  [[ -n "$pinned_run"  ]] && set_count=$((set_count+1))
+  [[ -n "$alt_logdir"  ]] && set_count=$((set_count+1))
+  [[ -n "$alt_src"     ]] && set_count=$((set_count+1))
+  [[ -n "$alt_session" ]] && set_count=$((set_count+1))
+  if (( set_count > 1 )); then
+    die "extract-timing: --run, --logdir, --src and --session are mutually exclusive"
+  fi
+
+  local extractor="${TINDERBOX_TIMING_EXTRACTOR:-$LIBEXEC_DIR/extract-timing.py}"
+  [[ -f "$extractor" ]] || die "timing extractor not found: $extractor"
+  command -v python3 >/dev/null 2>&1 || die "python3 not found in PATH"
+
+  # Resolve source + default output path. The auto-detected default
+  # mirrors phase-stats: report files ride alongside each matrix run's
+  # analysis artefacts (analysis.json, phase_stats.pl).
+  local source_kind="" source_arg=""
+  if [[ -n "$alt_session" ]]; then
+    [[ -d "$alt_session" ]] || die "session dir not found: $alt_session"
+    source_kind="--session"
+    source_arg="$alt_session"
+  elif [[ -n "$alt_src" ]]; then
+    [[ -d "$alt_src" ]] || die "src not found: $alt_src"
+    source_kind="--src"
+    source_arg="$alt_src"
+  elif [[ -n "$alt_logdir" ]]; then
+    [[ -d "$alt_logdir" ]] || die "logdir not found: $alt_logdir"
+    source_kind="--logdir"
+    source_arg="$alt_logdir"
+  else
+    local reports_dir="${REPORTS_DIR_DEFAULT:-$TINDERBOX_ROOT/reports}"
+    local run="$pinned_run"
+    if [[ -z "$run" ]]; then
+      run="$(find "$reports_dir" -maxdepth 1 -mindepth 1 -type d \
+                  -regextype posix-extended \
+                  -regex ".*/compare-matrix-[0-9]{8}T[0-9]{6}" \
+                  -printf '%T@\t%p\n' 2>/dev/null \
+              | sort -rn | head -n1 | cut -f2-)"
+      [[ -n "$run" ]] || die "no compare-matrix-<stamp> run found under $reports_dir; use --run, --logdir, --src or --session"
+      log_info "auto-detected run: $(basename "$run")"
+    fi
+    [[ -d "$run" ]] || die "run dir not found: $run"
+    source_kind="--run"
+    source_arg="$run"
+  fi
+
+  if [[ -z "$out_path" ]]; then
+    case "$source_kind" in
+      --run)     out_path="$source_arg/timing.json" ;;
+      --session) out_path="$source_arg/timing.json" ;;
+      *)         out_path="$source_arg/timing.json" ;;
+    esac
+  fi
+
+  local args=("$extractor" "$source_kind" "$source_arg" --out "$out_path")
+  (( quiet )) && args+=(--quiet)
+
+  log_info "→ python3 $(basename "$extractor") $source_kind $source_arg --out $out_path"
+  install -d "$(dirname "$out_path")"
+
+  if python3 "${args[@]}"; then
+    log_ok "timing report written"
+    log_info "  json: $out_path"
+    return 0
+  fi
+  return 1
+}
+
+# =============================================================================
 # Internal: chroot the baseline directly (bootstrap-time only)
 # =============================================================================
 #
@@ -3124,12 +3970,12 @@ _ns_helper_main() {
 
 cp_template() {
   local name="$1" dest="$2"
-  [[ -f "$LIB_DIR/$name" ]] || die "missing template $LIB_DIR/$name"
+  [[ -f "$SHARE_DIR/$name" ]] || die "missing template $SHARE_DIR/$name"
   local nproc_val
   nproc_val="$(nproc 2>/dev/null || echo 4)"
   sed -e "s|@NPROC@|$nproc_val|g" \
       -e "s|@GENTOO_PROFILE@|$GENTOO_PROFILE|g" \
-      "$LIB_DIR/$name" >"$dest"
+      "$SHARE_DIR/$name" >"$dest"
   chmod 0644 "$dest"
 }
 
@@ -3210,6 +4056,43 @@ Subcommands:
                            compare-matrix run; --once for a one-shot dump
                            (also the default when stdout is not a tty).
 
+  analyze [--run DIR |     Plan-correctness analysis over a matrix run (or
+           --logdir DIR]   any dir of compare-<label>-<stamp>/ subdirs).
+          [--out FILE]     Pairs portage-ng.plan.log and emerge.plan.log
+          [--jobs N]       per package and feeds them through
+          [--md5-cache D]  share/tinderbox-ng/compare-merge-emerge.py to
+          [--target-regex] compute Jaccard set agreement, Kendall+Spearman
+                           ordering metrics, dep-aware concordance and
+                           violation rate (with --md5-cache), domain
+                           assumptions, blockers, cycle breaks, download
+                           agreement, and timing. Writes <source>/
+                           analysis.{json,txt}. Alias: `analyse`.
+
+  phase-stats [--run DIR | Consolidate per-session phase_stats.pl files
+               --logdir D| (salvaged into each compare logdir by
+               --src DIR]  `compare`) into a single master phase_stats.pl
+              [--out FILE] suitable as the next portage-ng instance's
+              [--aggregator NAME]
+                           Knowledge/phase_stats.pl seed for build-time
+              [--min-observations N]
+                           forecasting. Aggregator is one of
+              [--exclude-glob PAT ...]
+                           median (default) | mean | max | p75 | p90.
+                           Default output: <run>/phase_stats.pl. Aliases:
+                           `phase_stats`, `consolidate-phase-stats`.
+
+  extract-timing [--run DIR | --logdir DIR | --src DIR | --session DIR]
+                 [--out FILE] [--quiet]
+                           Extract per-engine wall-clock timing from
+                           compare session logs into a JSON report
+                           (started/ended/wall_time_ms/rc per pass plus
+                           pn-vs-emerge ratios and aggregate stats).
+                           Reads the <log>.timing files cmd_compare
+                           writes; falls back to log mtime/ctime for
+                           older sessions. Default output:
+                           <source>/timing.json. Aliases: `timing`,
+                           `extract_timing`.
+
   tmpfs-up                 Mount the shared sessions tmpfs (idempotent).
                            Auto-runs on `new`/`compare`/`continue`; this
                            is for explicit pre-allocation before a long
@@ -3228,6 +4111,23 @@ Environment:
                                   baseline (default sys-kernel/gentoo-sources).
                                   Read by bootstrap_install_kernel_sources and
                                   the `install-kernel-sources` retrofit.
+  TINDERBOX_LIBEXEC_DIR           Override location of executable helpers
+                                  (default $SCRIPT_DIR/../libexec/tinderbox-ng).
+  TINDERBOX_SHARE_DIR             Override location of data templates
+                                  (default $SCRIPT_DIR/../share/tinderbox-ng).
+  TINDERBOX_LIB_DIR               Legacy single-bucket override that maps to
+                                  both LIBEXEC_DIR and SHARE_DIR (pre-reorg
+                                  installs that flattened everything).
+  TINDERBOX_COMPARE_ANALYZER      Override path to compare-merge-emerge.py
+                                  (default $LIBEXEC_DIR/compare-merge-emerge.py).
+                                  Read by `tinderbox-ng analyze`.
+  TINDERBOX_PHASE_STATS_CONSOLIDATOR
+                                  Override path to consolidate-phase-stats.py
+                                  (default $LIBEXEC_DIR/consolidate-phase-stats.py).
+                                  Read by `tinderbox-ng phase-stats`.
+  TINDERBOX_TIMING_EXTRACTOR      Override path to extract-timing.py
+                                  (default $LIBEXEC_DIR/extract-timing.py).
+                                  Read by `tinderbox-ng extract-timing`.
   STAGE3_VARIANT                  e.g. amd64-openrc (default).
   PORTAGE_TREE_URL                Default https://github.com/gentoo-mirror/gentoo.git
   PORTAGE_TREE_PIN                Optional commit to pin during bootstrap.
@@ -3279,6 +4179,14 @@ main() {
     status)       cmd_status       "$@" ;;
     progress)     cmd_progress     "$@" ;;
     monitor)      cmd_progress     "$@" ;;
+    analyze)      cmd_analyze      "$@" ;;
+    analyse)      cmd_analyze      "$@" ;;
+    phase-stats)  cmd_phase_stats  "$@" ;;
+    phase_stats)  cmd_phase_stats  "$@" ;;
+    consolidate-phase-stats) cmd_phase_stats "$@" ;;
+    extract-timing) cmd_extract_timing "$@" ;;
+    extract_timing) cmd_extract_timing "$@" ;;
+    timing)         cmd_extract_timing "$@" ;;
     tmpfs-up)     cmd_tmpfs_up     "$@" ;;
     tmpfs_up)     cmd_tmpfs_up     "$@" ;;
     tmpfs-down)   cmd_tmpfs_down   "$@" ;;

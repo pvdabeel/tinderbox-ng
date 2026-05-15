@@ -1,23 +1,28 @@
 #!/bin/bash
 #
-# deploy-host.sh - one-shot host install for tinderbox-ng
+# contrib/deploy-host.sh - one-shot host install for tinderbox-ng
 #
-# Run from a tinderbox-ng repo checkout (the parent of bin/ + share/).
-# Pushes the script + templates to a remote VM, symlinks the entry point onto
-# $PATH, runs `tinderbox-ng doctor` to confirm prerequisites, and (optionally)
-# kicks off `bootstrap` followed by `selftest`.
+# Run from a tinderbox-ng repo checkout (the parent of bin/, libexec/ and
+# share/). Pushes those three trees to a remote VM, symlinks the entry point
+# and the manpage onto $PATH / $MANPATH, runs `tinderbox-ng doctor` to
+# confirm prerequisites, and (optionally) kicks off `bootstrap` followed by
+# `selftest`.
 #
 # This is steps 1-3 (host install) of the lifecycle described in README.md
 # wrapped in a single command. The bootstrap step itself can take hours and
 # is gated behind --bootstrap so this script can also be used as a fast
 # "rsync new tinderbox-ng + retest" for development iteration.
 #
+# This script lives under contrib/ because it runs on the dev machine, never
+# on the VM. The rsync step explicitly excludes /contrib so the dev-side
+# helpers never get pushed to the install prefix.
+#
 # Usage:
-#   ./deploy-host.sh user@vm-host                    # install + doctor only
-#   ./deploy-host.sh --bootstrap user@vm-host        # install + doctor + bootstrap + selftest
-#   ./deploy-host.sh --refresh-portage-ng user@vm-host
-#                                                    # install + push new portage-ng src
-#                                                    # into existing baseline
+#   ./contrib/deploy-host.sh user@vm-host                    # install + doctor only
+#   ./contrib/deploy-host.sh --bootstrap user@vm-host        # install + doctor + bootstrap + selftest
+#   ./contrib/deploy-host.sh --refresh-portage-ng user@vm-host
+#                                                            # install + push new portage-ng src
+#                                                            # into existing baseline
 #
 # Idempotent. Safe to re-run after every git pull on the dev machine.
 
@@ -38,7 +43,7 @@ Options:
                          that do NOT need a kb.qlf rebuild.
   --selftest             Run `tinderbox-ng selftest` on the remote after
                          install (independent of --bootstrap).
-  --remote-prefix DIR    Where to install the script + templates on the remote
+  --remote-prefix DIR    Where to install bin/, libexec/, share/ on the remote
                          (default: /usr/local/share/tinderbox-ng).
   --link DIR             Where to symlink the entry point on the remote
                          (default: /usr/local/sbin/tinderbox-ng).
@@ -54,10 +59,10 @@ Environment forwarded to remote bootstrap:
 
 Examples:
   # First-time install on a fresh VM:
-  TINDERBOX_BOOTSTRAP_SELFTEST=1 ./deploy-host.sh --bootstrap root@vm-linux.local
+  TINDERBOX_BOOTSTRAP_SELFTEST=1 ./contrib/deploy-host.sh --bootstrap root@vm-linux.local
 
   # After `git pull` on the dev machine: refresh script + templates + portage-ng src:
-  ./deploy-host.sh --refresh-portage-ng root@vm-linux.local
+  ./contrib/deploy-host.sh --refresh-portage-ng root@vm-linux.local
 USAGE
 }
 
@@ -97,6 +102,8 @@ REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
   || { echo "error: $REPO_ROOT/bin/tinderbox-ng not found" >&2; exit 2; }
 [[ -d "$REPO_ROOT/share/tinderbox-ng" ]] \
   || { echo "error: $REPO_ROOT/share/tinderbox-ng not found" >&2; exit 2; }
+[[ -d "$REPO_ROOT/libexec/tinderbox-ng" ]] \
+  || { echo "error: $REPO_ROOT/libexec/tinderbox-ng not found" >&2; exit 2; }
 
 # Forward bootstrap-relevant env. ssh's `env` strips most variables; pass the
 # small whitelist explicitly so the remote bootstrap honours them.
@@ -141,34 +148,45 @@ log() { printf '[deploy-host] %s\n' "$*" >&2; }
 log "remote: $REMOTE"
 log "prefix: $REMOTE_PREFIX  link: $REMOTE_LINK"
 
-# 1. rsync the repo root (bin/ + share/ + tools/ + reports/) onto the remote.
-#    Excludes:
-#      - deploy-host.sh (this script, not needed on the remote)
-#      - .git/ + reports/ (history + historical artifacts; saves bandwidth)
+# 1. rsync bin/ + libexec/ + share/ onto the remote.
+#    Excluded entirely:
+#      - .git/ (history; saves bandwidth)
+#      - reports/ (historical artefacts; large; not needed on the VM)
+#      - contrib/ (dev-machine helpers including this script; never installed)
 log "step 1/4: rsync $REPO_ROOT/ -> $REMOTE:$REMOTE_PREFIX/"
 remote_root "install -d $(printf '%q' "$REMOTE_PREFIX")"
 
-rsync -a --delete \
-  --exclude '.DS_Store' \
-  --exclude '__pycache__' \
-  --exclude '/.git' \
-  --exclude '/reports' \
-  --exclude '/bin/deploy-host.sh' \
+_rsync_excludes=(
+  --exclude '.DS_Store'
+  --exclude '__pycache__'
+  --exclude '/.git'
+  --exclude '/reports'
+  --exclude '/contrib'
+)
+
+rsync -a --delete "${_rsync_excludes[@]}" \
   --rsync-path="sudo -n rsync 2>/dev/null || rsync" \
   "$REPO_ROOT/" "$REMOTE:$REMOTE_PREFIX/" || \
-rsync -a --delete \
-  --exclude '.DS_Store' \
-  --exclude '__pycache__' \
-  --exclude '/.git' \
-  --exclude '/reports' \
-  --exclude '/bin/deploy-host.sh' \
+rsync -a --delete "${_rsync_excludes[@]}" \
   "$REPO_ROOT/" "$REMOTE:$REMOTE_PREFIX/"
 
-# 2. Symlink the entry point.
+# 2. Symlink the entry point + manpage.
 log "step 2/4: symlink $REMOTE_LINK -> $REMOTE_PREFIX/bin/tinderbox-ng"
 remote_root "install -d $(dirname $(printf '%q' "$REMOTE_LINK")) && \
              ln -sfn $(printf '%q' "$REMOTE_PREFIX/bin/tinderbox-ng") $(printf '%q' "$REMOTE_LINK") && \
              chmod +x $(printf '%q' "$REMOTE_PREFIX/bin/tinderbox-ng")"
+
+# Manpage: link tinderbox-ng.8 from the rsynced share/man/man8/ tree onto
+# the canonical /usr/local/share/man/man8/ path so `man tinderbox-ng` works
+# without operators having to extend MANPATH. mandb is best-effort: the
+# manpage is still readable via `man -l` if the cache update fails or the
+# host doesn't ship man-db.
+remote_root "if [[ -f $(printf '%q' "$REMOTE_PREFIX/share/man/man8/tinderbox-ng.8") ]]; then \
+               install -d /usr/local/share/man/man8 && \
+               ln -sfn $(printf '%q' "$REMOTE_PREFIX/share/man/man8/tinderbox-ng.8") \
+                       /usr/local/share/man/man8/tinderbox-ng.8 && \
+               command -v mandb >/dev/null 2>&1 && mandb -q /usr/local/share/man >/dev/null 2>&1 || true; \
+             fi"
 
 # 3. Run doctor to confirm host prerequisites.
 log "step 3/4: $REMOTE_LINK doctor"

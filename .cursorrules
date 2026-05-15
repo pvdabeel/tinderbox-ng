@@ -1,0 +1,574 @@
+This repository is a Bash-based Gentoo build-testing rig (tinderbox-ng).
+
+## Description
+
+`tinderbox-ng` builds an immutable Gentoo baseline (latest stage3 +
+SWI-Prolog + [portage-ng](https://github.com/pvdabeel/portage-ng) +
+matching `kb.qlf`) and exposes it as the lower layer of an
+overlayfs-backed chroot. Each experiment runs in its own session whose
+writes land in an upper layer that can be discarded with one command.
+Sessions live under a per-namespace mount tree so the host root is
+never mutated.
+
+The headline workflow is **side-by-side resolver comparison**: run the
+same target through `portage-ng` and the traditional Gentoo `emerge` in
+two fresh, identical sessions and inspect their differences. The
+in-repo Python tooling then feeds those per-session logs into
+plan-correctness metrics (Jaccard / Kendall-tau / Spearman / dep-aware
+concordance) and forecasting tables (median/p75/max of phase byte +
+wall-clock counts).
+
+`tinderbox-ng` was extracted from the `portage-ng` repository at
+commit `26069d06` and now lives standalone. The "Compatibility with
+portage-ng" section in `README.md` pins the cross-repo contract.
+
+The repo follows FHS conventions: `bin/` for the on-VM entry point,
+`libexec/<name>/` for executable helpers `tinderbox-ng` invokes
+internally, `share/<name>/` for read-only data, and `contrib/` for
+dev-machine helpers that are NEVER deployed to the VM. Each script has
+exactly one home, decided by *who runs it and why*.
+
+- `bin/tinderbox-ng` (~3970 lines): the main orchestration script.
+  All user-facing subcommands and chroot/overlay/mount-namespace logic
+  live here. Dispatches via a `case` block in `main()` near the bottom.
+- `libexec/tinderbox-ng/`: executable helpers `tinderbox-ng` invokes
+  internally (or installs into the baseline). Not user-facing.
+  - `compare-merge-emerge.py` (~1570 lines): plan-correctness analyzer
+    (Jaccard, Kendall-tau, Spearman, dep-aware metrics, USE/version
+    diffs). Vendored from the prolog repo (`Reports/Scripts/`) at the
+    `tinderbox-ng analyze` integration. **Source of truth lives here
+    now.** Do NOT edit a copy in the prolog repo.
+  - `consolidate-phase-stats.py` (~340 lines): aggregates per-session
+    `phase_stats.pl` files into a master forecast file portage-ng can
+    load as `Knowledge/phase_stats.pl`.
+  - `extract-timing.py` (~470 lines): walks compare session log dirs
+    and emits a JSON report comparing portage-ng vs emerge wall-clock
+    timing per pass (plan/build) plus pn/em ratios, head-to-head
+    wins, and per-phase totals when `phase_stats.pl` is present.
+    Reads `<log>.timing` companion files written by
+    `_compare_run_pass`; falls back to log mtime/ctime delta for
+    older sessions and flags those entries with `mtime_estimated:
+    true`. Adapted from `prolog/Reports/Scripts/extract-timing.py`,
+    which was based on the legacy graph `.merge`/`.emerge` files —
+    that input layout is gone, only the tinderbox-ng compare-session
+    layout is supported here.
+  - `compare-matrix.sh`: parallel `compare` driver over a manifest.
+    Runs on the host (NOT inside chroot). Produces
+    `compare-matrix-<stamp>/results.tsv` plus per-package wrapper logs.
+    Invoked by `tinderbox-ng continue`.
+  - `run-matrix.sh`: `tinderbox-matrix` test runner. Installed inside
+    the baseline as `/usr/local/bin/tinderbox-matrix`; supports the
+    `metadata|resolver|merge|test|emptytree` tiers.
+- `share/tinderbox-ng/`: pure data — templates copied into the baseline
+  and manifest fixtures. Nothing executable lives here.
+  - `baseline.make.conf`, `baseline.package.use`, `baseline.repos.conf`:
+    `/etc/portage/` config copied into the baseline at bootstrap.
+  - `portage-ng-dev.in`: in-chroot launcher template (with `@NPROC@`,
+    `@GENTOO_PROFILE@`, `@PORTAGE_NG_ROOT@` token substitution applied
+    by `cp_template`).
+  - `manifest-100.txt`, `manifest-1000.txt`: matrix manifest fixtures.
+- `share/man/man8/tinderbox-ng.8`: manpage, linted clean against
+  `mandoc -Tlint`. Installed on the VM at
+  `/usr/local/share/man/man8/tinderbox-ng.8` (symlinked by
+  `deploy-host.sh`). When you add or change a subcommand / flag /
+  env var, update this file too — it's the canonical user reference.
+- `contrib/`: dev-machine helpers. Never deployed to the VM
+  (`deploy-host.sh`'s rsync excludes `/contrib`).
+  - `deploy-host.sh` (~200 lines): one-shot host install. `rsync`s
+    `bin/`, `libexec/`, `share/` onto a remote VM, symlinks the entry
+    point + manpage, runs `doctor`, optionally `bootstrap` +
+    `selftest`. Idempotent; safe to re-run.
+  - `deploy-baseline.sh`: safe scp of a single template with `@-token`
+    substitution (use this instead of raw `scp` to avoid leaving
+    literal `@NPROC@` in `make.conf`).
+  - `render-compare-matrix.py`: render `compare-matrix-*/results.tsv`
+    to Markdown for archival under `reports/`.
+  - `easy-pkgs.sh`: convenience smoke driver over a curated easy-pkg
+    list.
+- `reports/`: historical compare-matrix snapshots (committed as
+  Markdown; raw JSON / per-package logs are not in git).
+
+
+## Architecture (mental model)
+
+The script is one big bash file (`bin/tinderbox-ng`). It is structured
+as a flat dispatcher that fans out to `cmd_*` functions, plus a small
+internal layer for chroot/overlay/mount-namespace plumbing.
+
+### Lifecycle (top-level subcommands, in canonical order)
+
+1. `doctor` — preflight prerequisites (kernel module, tools, free
+   space, host overlay support). Run automatically before every
+   destructive op.
+2. `bootstrap` — long-running (~hours): downloads + verifies stage3,
+   stages a baseline under `$TINDERBOX_ROOT/baseline/`, emerges
+   `dev-lang/swi-prolog` + `sys-kernel/gentoo-sources` (sets
+   `/usr/src/linux`), seeds `/opt/portage-ng/`, generates `kb.qlf`,
+   freezes the baseline ro. Idempotent given `TINDERBOX_REBOOTSTRAP=1`.
+3. `selftest` — runs a tiny `compare` to confirm the baseline works.
+4. Maintenance retrofits: `refresh-tree`, `refresh-kb`,
+   `refresh-portage-ng`, `install-ccache`, `install-kernel-sources`,
+   `baseline-thaw`.
+5. Session ops: `new`, `enter`, `exec`, `exit`, `reset`, `destroy`,
+   `list`, `diff`.
+6. Resolver ops: `portage-ng` (alias `pn`), `emerge` (alias `em`),
+   `compare` (alias `cmp`), `continue` (alias `resume`).
+7. Observability: `status`, `progress` (alias `monitor`),
+   `analyze` (alias `analyse`), `phase-stats` (alias `phase_stats` /
+   `consolidate-phase-stats`), `extract-timing` (alias `timing` /
+   `extract_timing`).
+8. Internal: `__ns-helper` is the re-entry point inside
+   `unshare --mount --propagation=private`. Never invoked by users.
+
+### Key invariants
+
+- Every chroot operation runs inside an unshared mount namespace
+  (`unshare --mount --propagation=private`). The script re-execs
+  itself with `__ns-helper` so the mounts disappear automatically when
+  the helper exits, even on `kill -9`.
+- The baseline (`/srv/tinderbox-ng/baseline/`) is the OverlayFS
+  **lower layer**. After `bootstrap` it is bind-mounted ro into every
+  session.
+- Every session is `lower=baseline + upper=sessions/<name>/upper +
+  work=sessions/<name>/work + merged=sessions/<name>/merged`. Killing
+  a session is `umount -R merged && rm -rf upper work`.
+- `$TINDERBOX_ROOT/shared/` (Portage tree, distfiles, ccache, binpkgs,
+  stage3 cache) is bind-mounted into every session at canonical
+  in-chroot paths (`/usr/portage`, `/var/cache/{distfiles,ccache,
+  binpkgs}`).
+- The Portage tree is **git-pinned**: `_set_tree_pin()` clones,
+  fetches, and `git reset --hard`s to a specific commit. The pin is
+  recorded in `$SHARED_DIR/portage-tree.commit`.
+
+### compare/analyze/phase-stats pipeline
+
+```
+compare <pkg>                 (per-package, run in parallel for both engines)
+  ├─ portage-ng.plan.log[.exit][.timing]
+  ├─ portage-ng.build.log[.exit][.timing]    (--build pass, only if plan ok)
+  ├─ portage-ng.target.<cp>.build.log        (salvaged target log)
+  ├─ phase_stats.pl                          (salvaged from /opt/portage-ng/Knowledge/)
+  ├─ emerge.plan.log[.exit][.timing]
+  ├─ emerge.build.log[.exit][.timing]        (PORTAGE_LOGDIR=/var/log/portage)
+  └─ emerge.target.<cp>.<pf>.log[.gz]
+                                                       │
+                                                       ▼
+analyze --run <run>         ─►  libexec/tinderbox-ng/compare-merge-emerge.py
+                                  ├─ analysis.json   (structured metrics)
+                                  └─ analysis.txt    (captured stdout summary)
+
+phase-stats --run <run>     ─►  libexec/tinderbox-ng/consolidate-phase-stats.py
+                                  └─ phase_stats.pl  (master forecast file)
+
+extract-timing --run <run>  ─►  libexec/tinderbox-ng/extract-timing.py
+                                  └─ timing.json     (per-pass wall clock,
+                                                      pn/em ratios, head-to-head)
+```
+
+Per-session compare logs land in
+`/srv/tinderbox-ng/logs/compare-<label>-<stamp>/`. Matrix-run reports
+land in `/srv/tinderbox-ng/reports/compare-matrix-<stamp>/`. All three
+of `analyze`, `phase-stats` and `extract-timing` auto-detect the most
+recent matrix run when invoked without `--run` / `--logdir`.
+
+`<log>.timing` companion files are written by `_compare_run_pass`
+inside `cmd_compare`. Format is key=value, one pair per line:
+`started=<epoch_s>`, `ended=<epoch_s>`, `wall_time_ms=<int>`,
+`rc=<int>`. They are the canonical wall-clock source for
+`extract-timing`; the `mtime/ctime` fallback only fires for sessions
+that predate that capture and exists purely so the report doesn't
+silently lose old data.
+
+
+## Compare merge vs emerge plans (compare-merge-emerge.py)
+
+This is **the same script** documented in the portage-ng `.cursorrules`,
+but the source of truth is `libexec/tinderbox-ng/compare-merge-emerge.py`
+in this repo (not `Reports/Scripts/` in prolog/). The metric formulas
+and JSON output schema are unchanged; only the input layout differs.
+
+### Inputs
+
+`compare-merge-emerge.py` expects a `--root DIR` containing pairs of
+files named `<label>.merge` (portage-ng output) and `<label>.emerge`
+(emerge output). `tinderbox-ng analyze` builds a transient symlink
+tree to bridge tinderbox-ng's per-package log directory layout to the
+analyzer's flat input format:
+
+```
+<work_dir>/
+├── <label1>.merge   -> /srv/tinderbox-ng/logs/compare-<label1>-<stamp>/portage-ng.plan.log
+├── <label1>.emerge  -> /srv/tinderbox-ng/logs/compare-<label1>-<stamp>/emerge.plan.log
+├── <label2>.merge   -> ...
+└── <label2>.emerge  -> ...
+```
+
+Pairs without both `portage-ng.plan.log` and `emerge.plan.log` are
+skipped silently. `cmd_analyze` finds compare logdirs via:
+
+- For matrix runs (`--run DIR`): each `<label>.log` wrapper file under
+  the run dir contains `running both engines in parallel (logs:
+  /srv/tinderbox-ng/logs/compare-<label>-<stamp>)`. That path is the
+  pair root.
+- For ad-hoc runs (`--logdir DIR`): walk `DIR` for
+  `compare-*-<stamp>/` subdirs directly.
+
+### Pass-throughs to the analyzer
+
+`tinderbox-ng analyze` forwards:
+- `--jobs N` — parallel workers (default `nproc/2`).
+- `--md5-cache DIR` — enables dep-aware metrics (DepConc%, Viol%).
+  Point at `/srv/tinderbox-ng/baseline/var/db/repos/gentoo/metadata/md5-cache`.
+- `--target-regex RE` — restrict to pairs whose label matches.
+- `--full-lists` — include per-pair missing/extra/use-mismatch lists
+  in JSON.
+
+### Output (default `<source>/analysis.{json,txt}`)
+
+- `analysis.json` — full structured metrics dump.
+- `analysis.txt`  — captured stdout summary (line-oriented overview).
+
+The metric formulas (`% vs portage merge_ok` for CN / CN+V / CN+V+U
++ Order% / blockers / cycle breaks / domain assumptions) are the
+canonical ones documented in the portage-ng `.cursorrules`. **Do not
+duplicate those formulas here** — this repo just produces the inputs
+and wraps the script.
+
+### Parser quirks (do not regress)
+
+- **`[binary]` lines**: emerge with `FEATURES=buildpkg` (the default
+  here) prints `[binary  N    ] cat/pn-ver-...` for binpkg merges.
+  The `parse_emerge` regex matches both `[ebuild]` AND `[binary]`:
+
+  ```python
+  line_re = re.compile(
+      r"^\[\s*(?:ebuild|binary)\s+([A-Z])[^]]*\]\s+(\S+)(?:\s+.*)?$",
+      re.IGNORECASE,
+  )
+  ```
+
+- **Version normalization (`split_pn_ver`)**: emerge under
+  `FEATURES=binpkg-multi-instance` prints binpkgs as
+  `cat/pn-ver-<BUILD_ID>` (e.g. `app-misc/jq-1.8.1-8`,
+  `dev-libs/oniguruma-6.9.10-11`). portage-ng prints just `cat/pn-ver`.
+  The split function:
+  1. Scans **left-to-right** for the first `-<digit>` boundary
+     (canonical Gentoo PMS algorithm) — NOT right-to-left, which
+     mis-attributes the trailing `-<int>` BUILD_ID to the version.
+  2. After the split, strips a trailing `-<int>` (without `r` prefix)
+     from the version. `-rN` revisions are kept; `-N` build_ids are
+     stripped.
+
+  Test cases that must round-trip cleanly:
+  ```
+  jq-1.8.1                 → ('jq', '1.8.1')
+  jq-1.8.1-8               → ('jq', '1.8.1')          # build_id stripped
+  oniguruma-6.9.10-r11     → ('oniguruma', '6.9.10-r11')
+  oniguruma-6.9.10-r11-1   → ('oniguruma', '6.9.10-r11')
+  xfce4-panel-4.18.0       → ('xfce4-panel', '4.18.0')
+  1password-cli-2.27.0     → ('1password-cli', '2.27.0')
+  gtk+-3.24.0              → ('gtk+', '3.24.0')
+  ```
+
+
+## Build-time forecasting (consolidate-phase-stats.py)
+
+Each `compare --build` session has portage-ng emit
+`Knowledge/phase_stats.pl` (one `phase_bytes/3` + `phase_seconds/3`
+fact per `(Entry, Phase)`), and `_compare_salvage_phase_stats` (in
+`cmd_compare`) copies it into the per-package compare logdir as
+`<logdir>/phase_stats.pl` immediately after the build pass — so it
+sits alongside the plan/build/target logs and never relies on the
+session's upper layer surviving. Across a manifest you therefore end
+up with exactly one `phase_stats.pl` per compare session, all under
+`/srv/tinderbox-ng/logs/compare-<label>-<stamp>/`.
+
+`consolidate-phase-stats.py` aggregates those per-session files into
+a single master. Its three input modes match the canonical layout:
+
+- `--run DIR` (default): matrix run dir. The wrapper looks for
+  `phase_stats.pl` directly under the run, and falls back to scanning
+  `$LOGS_DIR` (where the per-session compare logdirs actually live)
+  when none are found there.
+- `--logdir DIR`: flat container of `compare-<label>-<stamp>/`
+  subdirs (e.g. `/srv/tinderbox-ng/logs/`).
+- `--src DIR`: arbitrary directory tree — escape hatch for ad-hoc
+  consolidation across machines, archives, etc.
+
+In all three modes the script does the same thing internally: walk
+the tree for files literally named `phase_stats.pl` and aggregate
+across `(Entry, Phase)`. The "literally named" walk is an
+implementation detail; the canonical input layout is one file per
+compare session under that session's logdir.
+
+### Format compatibility (do not regress)
+
+The output **must** parse cleanly through portage-ng's
+`ebuild_exec:read_phase_stats/1` (a recursive `read_term/2` loop) AND
+swipl's `consult/1`. Required:
+
+- Single-quote `Entry` (`'cat/pn-ver'`); bare-atom `Phase`; integer
+  `Bytes`; 6-decimal `Seconds`. Matches `format(S, '~q', X)` from
+  `ebuild_exec:save_phase_stats/0`.
+- Emit `:- discontiguous phase_bytes/3, phase_seconds/3.` near the
+  top so the file consults without warnings (we group by entry, not
+  by predicate). The directive is silently skipped by portage-ng's
+  loader (term matches neither `phase_bytes/3` nor `phase_seconds/3`).
+- `%!` comment headers are fine — `read_term/2` skips them entirely.
+
+### Aggregators
+
+| Choice  | Use case |
+|---------|----------|
+| `median` (default) | Robust against cold-cache outliers. |
+| `mean`   | Plain average of all observations. |
+| `max`    | Worst-case envelope; useful for upper-bound progress bars. |
+| `p75`    | Slightly pessimistic forecast. |
+| `p90`    | Strongly pessimistic forecast. |
+
+`--min-observations N` drops `(Entry, Phase)` buckets with fewer than
+`N` samples (useful when consolidating across heterogeneous fleets).
+`--exclude-glob PAT` skips matching paths during the input scan; the
+output file is excluded automatically (so it's safe to run in-place).
+
+### Default output paths
+
+- `--run DIR` (default): `<run>/phase_stats.pl` — alongside
+  `analysis.{json,txt}` in the matrix run dir.
+- `--logdir DIR` / `--src DIR`: `<source>/phase_stats.pl`.
+
+For matrix runs, `cmd_phase_stats` auto-falls back to scanning
+`$LOGS_DIR` (`/srv/tinderbox-ng/logs/`) when no `phase_stats.pl` files
+are found under the run dir itself, since the per-package files live
+under `compare-<label>-<stamp>/`.
+
+
+## Naming conventions (bash + python)
+
+- Bash subcommand functions: `cmd_<name>()` (snake_case). Internal
+  helpers: `_<name>()`. Mount-namespace helpers: `_ns_<name>()`.
+- Subcommand aliases: prefer `kebab-case` as the canonical name with
+  a `snake_case` alias (e.g. `refresh-tree` + `refresh_tree`,
+  `phase-stats` + `phase_stats`). Both go through the same dispatcher.
+- Env vars: `TINDERBOX_*` for first-class config, `STAGE3_*`,
+  `PORTAGE_*`, `GENTOO_*` for upstream-shaped knobs.
+- Python script names use `kebab-case.py` (`compare-merge-emerge.py`,
+  `consolidate-phase-stats.py`, `render-compare-matrix.py`). Module
+  identifiers inside Python use `snake_case`.
+- Log file names use snake_case in the filesystem (`compare-<label>-<stamp>/portage-ng.plan.log`).
+
+
+## Bash file documentation style
+
+Every long-lived `cmd_*` function in `bin/tinderbox-ng` has a section
+banner and a docstring:
+
+```bash
+# =============================================================================
+# tinderbox-ng <subcommand>:
+#   one-line summary
+# =============================================================================
+#
+# Longer description: what this does, what it produces, when to call it.
+# Inputs (flags), outputs (paths), pass-throughs.
+#
+# Edge cases / gotchas worth surfacing.
+
+cmd_<name>() {
+  ...
+}
+```
+
+Section banners use `# === ... ===` for top-level chapters and
+`# --- ... ---` for sub-sections within a long function (rare; we
+prefer to break them into helper functions).
+
+Comments inside function bodies should explain **why**, not narrate
+**what**. Avoid obvious comments. Comments that justify a non-obvious
+choice (e.g. "use `bash -c "find ... -delete"` because zsh's `nomatch`
+trips up `rm -rf glob*`") are valuable and should stay.
+
+
+## How to develop / test (IMPORTANT)
+
+### Local edit-test loop
+
+The script is bash and the analyzers are Python stdlib-only. Local
+quick tests:
+
+```sh
+# Bash syntax check (no execution):
+bash -n bin/tinderbox-ng
+bash -n contrib/deploy-host.sh
+bash -n libexec/tinderbox-ng/compare-matrix.sh
+bash -n libexec/tinderbox-ng/run-matrix.sh
+
+# Python compile-check:
+python3 -m py_compile libexec/tinderbox-ng/compare-merge-emerge.py
+python3 -m py_compile libexec/tinderbox-ng/consolidate-phase-stats.py
+python3 -m py_compile libexec/tinderbox-ng/extract-timing.py
+python3 -m py_compile contrib/render-compare-matrix.py
+
+# Manpage lint (clean run, no warnings):
+mandoc -Tlint share/man/man8/tinderbox-ng.8
+
+# Help-text smoke for new subcommand flags:
+bin/tinderbox-ng <subcmd> --help
+```
+
+But you cannot exercise the chroot / overlay / `compare` flow on
+macOS — that requires a Linux host with `overlay` support, root,
+and a populated baseline. Test those on the VM (see below).
+
+### Remote (VM) edit-test loop
+
+The canonical test target is `vm-linux.local` (a Linux VM with a
+fully bootstrapped baseline at `/srv/tinderbox-ng/`). Workflow:
+
+1. Edit on macOS.
+2. Push: `contrib/deploy-host.sh root@vm-linux.local`. This rsyncs
+   `bin/`, `libexec/`, `share/` to `/usr/local/share/tinderbox-ng/`,
+   re-symlinks `/usr/local/sbin/tinderbox-ng` and the manpage, runs
+   `doctor`.
+3. Quick remote checks:
+   ```sh
+   ssh root@vm-linux.local tinderbox-ng <subcmd> --help
+   ssh root@vm-linux.local tinderbox-ng status
+   ssh root@vm-linux.local tinderbox-ng list
+   ```
+4. Real exercise:
+   ```sh
+   ssh root@vm-linux.local tinderbox-ng compare app-misc/jq
+   ssh root@vm-linux.local tinderbox-ng analyze --run /srv/tinderbox-ng/reports/compare-matrix-<stamp>
+   ssh root@vm-linux.local tinderbox-ng phase-stats --src /srv/tinderbox-ng/logs --out /tmp/master.pl
+   ```
+
+For ad-hoc one-off runs without re-deploying every file:
+
+```sh
+# Helper script (Python or shell): goes into libexec/tinderbox-ng/
+scp libexec/tinderbox-ng/<file> root@vm-linux.local:/usr/local/share/tinderbox-ng/libexec/tinderbox-ng/<file>
+ssh root@vm-linux.local 'rm -rf /usr/local/share/tinderbox-ng/libexec/tinderbox-ng/__pycache__'
+
+# Data template/manifest: goes into share/tinderbox-ng/
+scp share/tinderbox-ng/<file> root@vm-linux.local:/usr/local/share/tinderbox-ng/share/tinderbox-ng/<file>
+```
+
+### Critical: `LIBEXEC_DIR` + `SHARE_DIR` resolution
+
+`bin/tinderbox-ng` resolves two install dirs:
+
+- `LIBEXEC_DIR` — executable helpers (`compare-matrix.sh`,
+  `compare-merge-emerge.py`, `consolidate-phase-stats.py`,
+  `run-matrix.sh`).
+- `SHARE_DIR` — read-only data (templates, manifests).
+
+Resolution priority (per bucket):
+
+1. `$TINDERBOX_LIBEXEC_DIR` / `$TINDERBOX_SHARE_DIR` (env overrides).
+2. `$TINDERBOX_LIB_DIR` (legacy single-bucket override; maps to both).
+3. `$SCRIPT_DIR/../libexec/tinderbox-ng` and
+   `$SCRIPT_DIR/../share/tinderbox-ng` — works for both dev checkouts
+   and the recommended installed layout
+   (`/usr/local/share/tinderbox-ng/{bin,libexec,share}/...`).
+
+When deploying ad-hoc copies of helpers during development, **always**
+scp them to `/usr/local/share/tinderbox-ng/libexec/tinderbox-ng/` (NOT
+the old `share/tinderbox-ng/` path under `/usr/local/share/...`). Use
+`TINDERBOX_COMPARE_ANALYZER` / `TINDERBOX_PHASE_STATS_CONSOLIDATOR` to
+override per-invocation when iterating on a single helper.
+
+### Pycache hazards
+
+Both Python helpers are loaded as scripts (not modules), but Python
+3.12+ still produces `__pycache__/` next to the script when imported.
+After updating `compare-merge-emerge.py` or `consolidate-phase-stats.py`
+on the VM, `rm -rf` the matching `__pycache__/` to avoid stale
+`.cpython-313.pyc` files masking your edits during smoke tests.
+
+
+## Common gotchas (lessons learned)
+
+### binpkg index visibility (Issue 3, fixed)
+
+In matrix runs, the in-flight compare sessions consume binpkgs from
+`$BINPKGS_DIR` (`/srv/tinderbox-ng/shared/binpkgs/`) and produce new
+ones via `FEATURES=buildpkg`. For sibling sessions to **see** binpkgs
+produced by their predecessors, two invariants must hold:
+
+1. `_ns_baseline_mount` and `_ns_session_mount` BOTH bind-mount
+   `$BINPKGS_DIR` to `$M$CHROOT_BINPKGS_PATH` (`/var/cache/binpkgs`).
+2. `_patch_portage_ng_host_config` rewrites
+   `Source/Config/vm-linux.local.pl` to use the in-chroot path
+   (`/var/cache/binpkgs`) for `binpkg:init` AND dynamically asserts
+   `config:binpkg_refresh(mtime).` (default `manual` does not pick
+   up new entries until process restart).
+
+If you see "No Packages index at /srv/tinderbox-ng/shared/binpkgs/Packages"
+in `refresh-kb` output, one of the above is broken.
+
+### gentoo-sources baseline
+
+`bootstrap_install_kernel_sources()` emerges
+`sys-kernel/gentoo-sources` into the baseline and sets
+`/usr/src/linux` symlink. Configurable via
+`TINDERBOX_KERNEL_PACKAGE`. Retrofit on an existing baseline with
+`tinderbox-ng install-kernel-sources`. Required because some ebuilds
+probe `/usr/src/linux` during `pkg_setup`.
+
+### `git checkout master` is fragile
+
+`gentoo-mirror` periodically force-pushes its history. Use
+`_set_tree_pin()` (which does `git fetch --depth=1 origin <pin>` then
+`git reset --hard FETCH_HEAD`) instead of plain `git checkout`. The
+default pin tracks `origin/HEAD`, so `_resolve_default_branch()` first
+queries the remote for the symref.
+
+### zsh `nomatch` vs `rm -rf glob*`
+
+The deploy script and ad-hoc cleanup commands sometimes run inside
+the user's interactive zsh. `rm -rf foo*` fails hard if `foo*` has no
+match (`zsh: no matches found`). Wrap with
+`bash -c "find ... -delete"` for portability.
+
+
+## Compatibility with portage-ng
+
+The cross-repo contract is documented in detail in `README.md`, but
+the short version:
+
+- `tinderbox-ng` clones the portage-ng repo (URL + ref) into the
+  baseline at bootstrap time, then `_patch_portage_ng_host_config`
+  rewrites paths in the baked-in `Source/Config/vm-linux.local.pl`
+  config (binpkg paths, refresh policy) to match the in-chroot layout.
+- The required portage-ng entry points are
+  `Source/Application/Wrapper/portage-ng-dev` (the standalone wrapper)
+  and `ebuild_exec:phase_stats_file/1` (forecasting file location).
+  If those move or change shape, `tinderbox-ng` breaks.
+- Knowledge artefacts are baseline-internal and not in the portage-ng
+  source repo: `Knowledge/{kb.qlf, kb.raw, profile.qlf, profile.raw,
+  embeddings.pl, phase_stats.pl, resume.pl}`,
+  `Source/{Snapshots, Certificates, Private}/`,
+  `Source/Knowledge/Sets/**/*.local`. The rsync exclude list inside
+  `cmd_refresh_portage_ng` is the canonical encoding.
+
+
+## Development flow
+
+- Use a git workflow.
+- Start development from clean committed state.
+- Iterate locally on macOS where possible (bash syntax,
+  `python3 -m py_compile`, unit tests of pure functions).
+- For chroot/overlay changes, push to the test VM with
+  `contrib/deploy-host.sh` and exercise with a smoke `compare`.
+- After a substantive change to the compare/analyze pipeline, regen a
+  small matrix run and diff `analysis.json` against the previous
+  snapshot in `reports/`.
+- Ask user for permission to commit. Never push to remote without
+  explicit consent.
+
+When in doubt about portage-ng-side behaviour (proof semantics,
+domain assumptions, knowledge base loading), defer to the
+portage-ng repository's `.cursorrules`. This file is intentionally
+narrow — it covers the rig, the deploy story, and the comparison
+tooling, not the resolver.
