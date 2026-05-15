@@ -1,0 +1,36 @@
+Tinderbox-ng is now just essentially a script that takes a stage3, adds prolog, kernel sources, portage-ng and copies in a few configuration files. 
+
+For each package in the manifest list (packages to be build), it layers an overlayfs over the modifed stage3 baseline and calls a package manager to build the target. This is a "session".
+
+A few directories inside each "session" are shared across sessions: 
+
+- the ccache, for speeding up compiles
+- distfiles, to prevent redownloading of the same file
+- binpkg, to store compiled packages, avoiding rebuilding them when they appear in another session as a dependency
+
+Once done, it copies out a few logs that we wants to keep. 
+
+Tinderbox-ng ships with a number of scripts that allow comparison of those logs: 
+
+- did emerge produce the same plan as portage-ng 
+- how fast was each stage
+- are there any deviations in the installed files. 
+
+This allows for generation of reports. 
+
+
+No rocket science, but very important to be able to ensure a portage-ng does its job. 
+
+Here's what I want to do conceptually: 
+
+- portage-ng already knows how to advertise its services using bonjour
+- portage-ng could reason about stages, overlays, if only it had a repository containing the knowledge
+- portage-ng already has an explain system and can even call llm to write human understandable explanations, or help debugging issues
+- portage-ng already has a jobserver, with distributed workers (for distributed proving)
+- portage-ng already understands transactions (think creating an overlay for new merge transactions)
+
+If we put everything together I believe it would be quite straightforward to ship portage-ng with bootstrap knowledge, enabling it to understand what a stage is, or set up one or more sessions to test "transactions".
+
+We have already proven that portage-ng phas a planning correctness exceeding 100% (it produces plans there where emerge cannot)
+We are now doing the same with tinderbox-ng (testing at least 100% build correctness).
+Once this is done, we start integration in portage-ng.
