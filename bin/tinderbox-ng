@@ -750,6 +750,7 @@ cmd_bootstrap() {
   bootstrap_post_stage3
   bootstrap_install_swipl
   bootstrap_install_ccache
+  bootstrap_install_kernel_sources
   bootstrap_install_portage_ng
   bootstrap_install_kb_qlf
 
@@ -978,6 +979,52 @@ ccache --version | head -n1
 ccache --show-config 2>/dev/null | grep -E '^(max_size|cache_dir|compression)' || true
 EOF
   log_ok "ccache installed; max_size=$TINDERBOX_CCACHE_MAX_SIZE; shared dir: $CCACHE_DIR"
+}
+
+# Install kernel sources into the baseline so ebuilds whose configure /
+# build phases probe `/usr/src/linux` (kernel headers, vmlinux symbols,
+# Module.symvers, etc.) succeed inside compare sessions. Without this,
+# packages like `app-emulation/virtualbox-modules`, `sys-power/cpupower`,
+# `sys-fs/zfs-kmod`, and a long tail of out-of-tree modules + tools that
+# scrape the kernel tree fail at src_configure with "no /usr/src/linux"
+# or "include/linux not found".
+#
+# We don't BUILD a kernel here -- the matrix never boots the chroot --
+# we just need the source tree on disk and `/usr/src/linux` pointing at
+# it so kbuild header lookups resolve. `eselect kernel set 1` does that
+# wiring; gentoo-sources also accepts USE=symlink as an alternative,
+# but eselect is more explicit and survives package upgrades cleanly.
+#
+# Kernel sources are baseline-shared via the overlay lower layer: every
+# session sees the same /usr/src/linux* without paying for a copy-up
+# until something writes there (which the matrix workload does not).
+# Distfiles + tarball land in $DISTFILES_DIR (bind-mounted), so the
+# ~150 MB tarball is fetched once across the host, not per-bootstrap.
+#
+# Idempotent: re-emerging an installed gentoo-sources is a no-op for
+# Portage; eselect-set on an already-correct symlink is a no-op too.
+#
+# Override the package via TINDERBOX_KERNEL_PACKAGE if you need a
+# specific kernel flavour (e.g. `sys-kernel/vanilla-sources`,
+# `sys-kernel/gentoo-kernel`); the eselect step is unconditional.
+bootstrap_install_kernel_sources() {
+  local kernel_pkg="${TINDERBOX_KERNEL_PACKAGE:-sys-kernel/gentoo-sources}"
+  log_info "emerge $kernel_pkg into baseline (provides /usr/src/linux for ebuilds that probe kernel headers)"
+  in_baseline_chroot bash -e <<EOF
+. /etc/profile
+emerge --quiet-build=y --jobs="\$(nproc)" --load-average="\$(nproc)" \
+       --keep-going=y --oneshot $kernel_pkg
+# eselect kernel ships in stage3 (sys-apps/eselect provides the 'kernel'
+# module). Idempotent: re-running points the symlink at the highest
+# installed version, which is what we want after a kernel-source bump.
+if eselect kernel list 2>/dev/null | grep -qE '^[[:space:]]*\['; then
+  eselect kernel set 1
+  ls -ld /usr/src/linux 2>/dev/null || true
+else
+  echo "warn: eselect kernel found no installed kernel sources" >&2
+fi
+EOF
+  log_ok "kernel sources installed; /usr/src/linux symlink set in baseline"
 }
 
 bootstrap_install_portage_ng() {
@@ -1311,6 +1358,35 @@ cmd_install_ccache() {
   bootstrap_install_ccache
 
   log_ok "install-ccache complete; subsequent sessions will hit the shared cache"
+}
+
+# =============================================================================
+# Subcommand: install-kernel-sources
+# =============================================================================
+#
+# Retrofit kernel sources into an already-bootstrapped baseline.
+# Equivalent to running `bootstrap_install_kernel_sources` standalone.
+# Idempotent: safe to re-run after a kernel-source version bump in the
+# tree -- emerge re-installs (or no-ops), eselect re-points the
+# /usr/src/linux symlink at the highest installed version.
+#
+# Use this when:
+#   - You bootstrapped on a tinderbox-ng revision before kernel sources
+#     were part of the bootstrap pipeline (this is the migration case).
+#   - You want to flip TINDERBOX_KERNEL_PACKAGE (e.g. swap gentoo-sources
+#     for vanilla-sources) without throwing the baseline away.
+#   - The pinned tree picked up a kernel-source revbump and you want
+#     the baseline to track it without a full re-bootstrap.
+
+cmd_install_kernel_sources() {
+  require_root
+  require_kernel_overlay
+  require_unshare
+  require_dirs
+
+  bootstrap_install_kernel_sources
+
+  log_ok "install-kernel-sources complete; subsequent sessions see /usr/src/linux"
 }
 
 # =============================================================================
@@ -2987,6 +3063,11 @@ Subcommands:
                            Does NOT regenerate kb.qlf.
   install-ccache           Retrofit dev-util/ccache + /etc/ccache.conf into an
                            existing baseline (or bump max_size). Idempotent.
+  install-kernel-sources   Retrofit sys-kernel/gentoo-sources (or
+                           \$TINDERBOX_KERNEL_PACKAGE) into an existing baseline
+                           and set /usr/src/linux via `eselect kernel set 1`.
+                           Needed for ebuilds that probe kernel headers
+                           during src_configure/src_compile. Idempotent.
   baseline-thaw            One-shot migration for legacy baselines bootstrapped
                            by an older tinderbox-ng that called bootstrap_freeze
                            (chmod a-w on files and/or dirs). Restores owner-write
@@ -3043,6 +3124,10 @@ Environment:
   TINDERBOX_CCACHE_MAX_SIZE       Cap for the shared ccache (default 100G).
                                   Read by bootstrap_install_ccache and the
                                   `install-ccache` retrofit subcommand.
+  TINDERBOX_KERNEL_PACKAGE        Kernel-source package emerged into the
+                                  baseline (default sys-kernel/gentoo-sources).
+                                  Read by bootstrap_install_kernel_sources and
+                                  the `install-kernel-sources` retrofit.
   STAGE3_VARIANT                  e.g. amd64-openrc (default).
   PORTAGE_TREE_URL                Default https://github.com/gentoo-mirror/gentoo.git
   PORTAGE_TREE_PIN                Optional commit to pin during bootstrap.
@@ -3070,6 +3155,8 @@ main() {
     refresh_portage_ng) cmd_refresh_portage_ng "$@" ;;
     install-ccache) cmd_install_ccache "$@" ;;
     install_ccache) cmd_install_ccache "$@" ;;
+    install-kernel-sources) cmd_install_kernel_sources "$@" ;;
+    install_kernel_sources) cmd_install_kernel_sources "$@" ;;
     baseline-thaw)         cmd_baseline_thaw "$@" ;;
     baseline_thaw)         cmd_baseline_thaw "$@" ;;
     new)          cmd_new          "$@" ;;
