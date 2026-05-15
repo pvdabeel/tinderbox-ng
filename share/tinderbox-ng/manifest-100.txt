@@ -76,11 +76,11 @@ www-client/w3m
 dev-vcs/mercurial
 dev-vcs/subversion
 dev-vcs/cvs
-dev-util/strace
-dev-util/ltrace
-dev-util/cmake
-dev-util/ninja
-dev-util/meson
+dev-debug/strace
+dev-debug/ltrace
+dev-build/cmake
+dev-build/ninja
+dev-build/meson
 dev-util/ccache
 
 # ---- system tools ------------------------------------------------------------
@@ -94,7 +94,7 @@ sys-apps/ripgrep
 sys-apps/the_silver_searcher
 sys-apps/fd
 sys-apps/bat
-sys-apps/tree
+app-text/tree
 sys-apps/lsd
 sys-fs/dosfstools
 sys-fs/exfatprogs
@@ -120,7 +120,7 @@ app-text/pandoc-cli
 app-text/dos2unix
 app-text/asciidoc
 app-text/wgetpaste
-app-doc/doxygen
+app-text/doxygen
 
 # ---- portage / gentoo tooling ------------------------------------------------
 app-portage/gentoolkit
@@ -135,7 +135,7 @@ dev-libs/icu
 
 # ---- misc utilities ----------------------------------------------------------
 sys-process/cronie
-sys-apps/at
+sys-process/at
 app-admin/sudo
 app-admin/logrotate
 

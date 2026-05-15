@@ -56,7 +56,6 @@ app-dicts/myspell-sw
 app-dicts/stardict-freedict-eng-ita
 app-dicts/stardict-xdict-zh-en-gb
 app-dicts/verbiste
-app-doc/doxygen
 app-doc/s6-man-pages
 app-editors/hexedit
 app-editors/jed
@@ -157,6 +156,7 @@ app-text/asciidoc
 app-text/bact
 app-text/delta
 app-text/dos2unix
+app-text/doxygen
 app-text/extract_url
 app-text/highlight
 app-text/html2text
@@ -167,6 +167,7 @@ app-text/pinfo
 app-text/rpl
 app-text/t1utils
 app-text/teseq
+app-text/tree
 app-text/vilistextum
 app-text/wgetpaste
 app-vim/ansiesc
@@ -193,6 +194,9 @@ app-xemacs/text-modes
 app-xemacs/view-process
 dev-ada/aunit
 dev-build/boost-m4
+dev-build/cmake
+dev-build/meson
+dev-build/ninja
 dev-cpp/benchmark
 dev-cpp/cld3
 dev-cpp/jwt-cpp
@@ -202,6 +206,8 @@ dev-db/libiodbc
 dev-db/recutils
 dev-debug/bpftrace
 dev-debug/drgn
+dev-debug/ltrace
+dev-debug/strace
 dev-embedded/arduino
 dev-embedded/avr-libc
 dev-embedded/avrdude
@@ -547,23 +553,18 @@ dev-util/astyle
 dev-util/autoproject
 dev-util/ccache
 dev-util/clinfo
-dev-util/cmake
 dev-util/conf2struct
 dev-util/dialog
 dev-util/gcovr
 dev-util/howdoi
 dev-util/imediff
 dev-util/local-log4j-vuln-scanner
-dev-util/ltrace
 dev-util/maxcso
-dev-util/meson
-dev-util/ninja
 dev-util/nsight-systems
 dev-util/packer
 dev-util/prek
 dev-util/qdevicemonitor
 dev-util/source-highlight
-dev-util/strace
 dev-vcs/breezy
 dev-vcs/cvs
 dev-vcs/mercurial
@@ -867,7 +868,6 @@ sec-policy/selinux-rpm
 sec-policy/selinux-sasl
 sec-policy/selinux-ulogd
 sec-policy/selinux-vde
-sys-apps/at
 sys-apps/azure-vm-utils
 sys-apps/bat
 sys-apps/ccs-tools
@@ -890,7 +890,6 @@ sys-apps/smartmontools
 sys-apps/syd-tui
 sys-apps/tcp-wrappers
 sys-apps/the_silver_searcher
-sys-apps/tree
 sys-apps/usbutils
 sys-auth/microsoft-identity-broker
 sys-auth/pam_u2f
@@ -927,6 +926,7 @@ sys-libs/gwenhywfar
 sys-libs/mtdev
 sys-power/sandmann-bin
 sys-process/anacron
+sys-process/at
 sys-process/atop
 sys-process/cronie
 sys-process/ctop
