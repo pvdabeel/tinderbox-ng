@@ -2347,8 +2347,16 @@ _compare_vdb_list() {
 # this is the first thing that needs to happen, otherwise new sessions
 # silently fall back to the underlying disk and saturate I/O.
 #
-# Foreground by default (so Ctrl-C still works); pass --background to
-# detach via nohup setsid nice and write a pidfile + driver log.
+# Foreground by default (so Ctrl-C still works); for unattended runs the
+# preferred wrapper is `screen` (lets you reattach to a live driver TTY
+# across SSH drops), e.g.
+#
+#   ssh root@vm-linux.local 'screen -dmS tinderbox-ng tinderbox-ng continue --jobs 16'
+#   ssh -t root@vm-linux.local screen -r tinderbox-ng     # reattach
+#
+# Pass --background as the no-screen fallback: detach via nohup setsid
+# nice and write a pidfile + driver log. That survives SSH drops too,
+# but daemonises the driver — there is no live TTY to reattach to.
 
 cmd_continue() {
   require_root
@@ -2387,7 +2395,13 @@ Options:
   --run DIR       Pin a specific previous run directory (otherwise auto).
   --jobs N        Override the --jobs setting recovered from meta.txt.
   --background    Detach with nohup setsid nice; write driver pid + log
-                  paths and exit immediately. Useful for unattended use.
+                  paths and exit immediately. Survives SSH drops, but
+                  daemonises the driver -- no live TTY to reattach to.
+                  For unattended runs, prefer wrapping the foreground
+                  invocation in screen so you keep a live TTY:
+                    ssh root@vm-linux.local screen -dmS tinderbox-ng \\
+                        tinderbox-ng continue --jobs 16
+                    ssh -t root@vm-linux.local screen -r tinderbox-ng
   --force         Bypass the "already running" guard. Only safe if you
                   really want two concurrent matrices on the box.
 

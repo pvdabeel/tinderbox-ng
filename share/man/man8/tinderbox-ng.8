@@ -706,6 +706,55 @@ sudo tinderbox\-ng compare \-\-build \-\-keep \-\-label jq\-debug app\-misc/jq
 .RE
 .fi
 .
+.SS Long\-running matrix runs (preferred: screen)
+The
+.B compare\-matrix
+helper drives
+.B "tinderbox\-ng compare"
+over a manifest of atoms (one
+.IR cat/pn
+per line, ``#'' comments OK). A full
+.B "\-\-build"
+sweep over the in\-repo
+.I manifest\-all.txt
+(~19k atoms) takes days, so the preferred way to launch one is inside a
+detached
+.BR screen (1)
+session. That keeps a live driver TTY you can reattach to (``screen \-r''),
+unlike the
+.B "\-\-background"
+flag (see
+.IR "Resume an interrupted matrix run" ),
+which uses
+.B "nohup setsid"
+to detach into a pure daemon \(em no TTY to reattach to, only the
+driver log under
+.I /srv/tinderbox\-ng/reports/all\-packages\-driver\-*.log
+remains tail\-able.
+.PP
+.nf
+.RS
+# Kick off a fresh matrix detached, from your dev machine:
+ssh root@vm\-linux.local 'screen \-dmS tinderbox\-ng \\
+    compare\-matrix \-\-build \-\-jobs 16 \\
+    \-\-manifest /usr/local/share/tinderbox\-ng/share/tinderbox\-ng/manifest\-all.txt'
+
+# Reattach the live driver TTY:
+ssh \-t root@vm\-linux.local screen \-r tinderbox\-ng
+
+# Detach again without killing the driver: Ctrl\-A d (inside screen).
+
+# Stop cleanly (in\-flight comparisons finish; partial results stay in TSV):
+ssh root@vm\-linux.local screen \-S tinderbox\-ng \-X stuff $'\\003'
+.RE
+.fi
+.PP
+.B compare\-matrix
+writes results.tsv incrementally and uses an flock so a SIGINT (Ctrl\-C)
+or SIGTERM is always safe \(em prior rows are durable, and
+.B "tinderbox\-ng continue"
+picks up the unfinished tail.
+.
 .SS Plan\-correctness analysis
 .nf
 .RS
@@ -750,6 +799,12 @@ sudo cp /srv/tinderbox\-ng/reports/compare\-matrix\-<stamp>/phase_stats.pl \\
 .SS Resume an interrupted matrix run
 .nf
 .RS
+# Preferred: same screen session as the original launch, so you keep a
+# live driver TTY:
+ssh root@vm\-linux.local screen \-dmS tinderbox\-ng \\
+    tinderbox\-ng continue \-\-jobs 16
+
+# No\-screen fallback: nohup setsid + pidfile + driver log, no TTY:
 sudo tinderbox\-ng continue \-\-jobs 16 \-\-background
 .RE
 .fi

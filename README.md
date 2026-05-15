@@ -45,7 +45,8 @@ tinderbox-ng/
 │   ├── baseline.repos.conf            #   /etc/portage/repos.conf/gentoo.conf
 │   ├── portage-ng-dev.in              #   in-chroot launcher (template)
 │   ├── manifest-100.txt               #   smoke manifest (100 atoms)
-│   └── manifest-1000.txt              #   full matrix manifest (1000 atoms)
+│   ├── manifest-1000.txt              #   release-comparison manifest (1000 atoms)
+│   └── manifest-all.txt               #   every cat/pn in the pinned tree (~19k atoms)
 │
 ├── share/man/man8/
 │   └── tinderbox-ng.8                 # manpage (→ /usr/local/share/man/man8/)
@@ -479,6 +480,80 @@ upper layer of each session is preserved at
 
 Exit code: `0` if both succeeded, `1` if exactly one failed, `2` if both
 failed. Useful for CI sweeps.
+
+### Long-running matrix runs (`compare-matrix`)
+
+`libexec/tinderbox-ng/compare-matrix.sh` (installed on the VM as
+`/usr/local/sbin/compare-matrix`) drives `tinderbox-ng compare` over a
+manifest of atoms (one `cat/pn` per line; `#` comments OK) and writes a
+`results.tsv` plus per-package compare logdirs as it goes. The shipped
+manifests live in `share/tinderbox-ng/`:
+
+| Manifest             | Atoms  | Use case                                      |
+|----------------------|-------:|-----------------------------------------------|
+| `manifest-100.txt`   |    100 | Curated smoke set, ~hour at `--build`.        |
+| `manifest-1000.txt`  |   1000 | Standard release-comparison run, ~a day.      |
+| `manifest-all.txt`   |  19243 | Every `cat/pn` in the pinned tree (regenerated; days at `--build`). |
+
+A full `--build` sweep over `manifest-all.txt` takes days, so
+**the preferred way to launch one is inside a detached `screen`
+session**. That keeps a live driver TTY you can reattach to after an
+SSH drop, unlike `nohup setsid` (or the equivalent `tinderbox-ng
+continue --background`) which detaches into a pure daemon with no TTY:
+
+```sh
+# Kick off a fresh matrix detached, from your dev machine:
+ssh root@vm-linux.local 'screen -dmS tinderbox-ng \
+    compare-matrix --build --jobs 16 \
+    --manifest /usr/local/share/tinderbox-ng/share/tinderbox-ng/manifest-all.txt'
+
+# Reattach the live driver TTY:
+ssh -t root@vm-linux.local screen -r tinderbox-ng
+
+# Detach again without killing the driver: Ctrl-A d (inside screen).
+
+# Stop cleanly (in-flight comparisons finish; partial results stay in TSV):
+ssh root@vm-linux.local screen -S tinderbox-ng -X stuff $'\003'
+```
+
+`compare-matrix.sh` writes `results.tsv` incrementally and uses an
+flock per row, so a SIGINT or SIGTERM is always safe — every prior row
+is durable, and `tinderbox-ng continue` picks up the unfinished tail.
+
+`--jobs N` runs N package comparisons concurrently. Each comparison
+itself spawns 2 sessions (portage-ng + emerge in parallel mount
+namespaces), so the actual session count peaks at 2N. The vm-linux
+baseline (32 cores / 50 GiB RAM) handles `--jobs 16` (32 peak
+sessions) cleanly with the sessions tmpfs at 100G; tune to keep load
+average under (`nproc` − small headroom).
+
+#### Resuming an interrupted matrix run
+
+If the driver dies (host reboot, `kill -TERM`, screen session closed,
+…) the `results.tsv` and per-package logs survive untouched. Resume
+into the same `screen` so you again have a live driver TTY:
+
+```sh
+# Preferred: re-launch in the same screen session:
+ssh root@vm-linux.local screen -dmS tinderbox-ng \
+    tinderbox-ng continue --jobs 16
+
+# No-screen fallback: nohup setsid + pidfile + driver log, no live TTY:
+ssh root@vm-linux.local sudo tinderbox-ng continue --jobs 16 --background
+```
+
+`tinderbox-ng continue` auto-detects the most recent
+`compare-matrix-<stamp>/` run dir, reads its `meta.txt` to recover the
+original `--pretend`/`--build` mode, manifest path, and `--jobs`
+setting, computes `manifest \ done-targets`, and dispatches
+`compare-matrix --resume-dir <run>` so the resumed work appends to the
+original `results.tsv` (no manual TSV merging). Each resume is logged
+in `meta.txt` as a `# ----- resumed at … -----` block. Pass `--run
+DIR` to pin a specific previous run instead of auto-detecting; pass
+`--jobs N` to override the original `--jobs`. The `--background` flag
+is the no-screen equivalent of wrapping in `screen -dmS`; refuses to
+launch if a `compare-matrix` driver is already in flight (override
+with `--force`, but two parallel matrices oversubscribe the host).
 
 ## Test matrix
 

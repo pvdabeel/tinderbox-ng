@@ -1,11 +1,24 @@
 #!/bin/bash
-# share/tinderbox-ng/compare-matrix.sh
+# libexec/tinderbox-ng/compare-matrix.sh
 #
 # Drive `tinderbox-ng compare` over a list of packages, parse each
 # summary table, and emit a single-line TSV record per target plus a
 # concise stdout report. Supports manifest files (one atom per line,
 # `#` for comments) so large package sets can live in version control.
 #
+# Preferred way to launch a long-running matrix: detach inside `screen`
+# so you keep a live driver TTY across SSH drops. The bare nohup-setsid
+# form (or `tinderbox-ng continue --background`) survives disconnects
+# too, but daemonises the driver -- there is no live TTY to reattach
+# to, only the driver log under
+# /srv/tinderbox-ng/reports/all-packages-driver-*.log.
+#
+#   # Preferred: detached screen (reattach with `screen -r tinderbox-ng`)
+#   ssh root@vm-linux.local 'screen -dmS tinderbox-ng \
+#       compare-matrix --build --jobs 16 \
+#       --manifest /usr/local/share/tinderbox-ng/share/tinderbox-ng/manifest-all.txt'
+#
+#   # Foreground (small smoke runs, or when you want SIGINT semantics):
 #   ssh root@vm-linux.local 'compare-matrix --pretend pkg1 pkg2 ...'
 #   ssh root@vm-linux.local 'compare-matrix --build --manifest /path/pkgs.txt'
 #   ssh root@vm-linux.local 'compare-matrix --build --jobs 8 --manifest ...'
@@ -13,13 +26,15 @@
 # `--jobs N` runs N package comparisons concurrently. Each comparison
 # itself spawns 2 sessions (portage-ng + emerge in parallel mount
 # namespaces), so the actual session count peaks at 2N. The vm-linux
-# baseline easily handles N=8 on a 32-core box; tune to keep load
-# under (cores - small headroom).
+# baseline easily handles N=8 on a 32-core box, and N=16 with the
+# sessions tmpfs at 100G; tune to keep load under (cores - small
+# headroom).
 #
 # Output goes to /srv/tinderbox-ng/reports/compare-matrix-<stamp>/.
 # The TSV is written incrementally, one row per package (mutex-locked
 # under --jobs > 1), so a long unattended run can be interrupted
-# without losing prior results.
+# without losing prior results -- `tinderbox-ng continue` then picks
+# up the unfinished tail and appends to the same TSV.
 #
 # Exit code: 0 if every comparison's portage-ng side matched (or
 # improved on) emerge in completion + VDB count; 1 otherwise.
