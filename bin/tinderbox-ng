@@ -851,32 +851,90 @@ bootstrap_unpack_stage3() {
   log_ok "stage3 unpacked"
 }
 
-bootstrap_pin_tree() {
-  if [[ -d "$TREE_DIR/.git" ]]; then
-    log_info "tree already cloned at $TREE_DIR; fetching"
-    if [[ -n "$PORTAGE_TREE_PIN" ]]; then
-      git -C "$TREE_DIR" fetch origin "$PORTAGE_TREE_PIN" 2>/dev/null \
-        || git -C "$TREE_DIR" fetch --unshallow origin 2>/dev/null \
-        || git -C "$TREE_DIR" fetch origin
-    else
-      git -C "$TREE_DIR" fetch --depth=1 origin master
-    fi
+# Resolve $TREE_DIR's HEAD to the requested pin. Used by both bootstrap_pin_tree
+# (initial clone / first pin) and cmd_refresh_tree (re-pin an existing checkout).
+#
+# Pin resolution rules:
+#   1. If $1 is non-empty, use it. Otherwise default to whatever origin's HEAD
+#      symref points at (e.g. `stable` for current gentoo-mirror, `master` for
+#      legacy mirrors). This avoids hard-coding a branch name that upstream
+#      may rename -- which is exactly what tripped up the previous code path
+#      after gentoo-mirror flipped its default branch from `master` to `stable`
+#      around 2026Q1: `git fetch origin master` succeeded against the new
+#      "master is now an alias of stable" mirror but `git checkout master`
+#      then failed because the local shallow clone never created a `master`
+#      branch tracker -- only `origin/stable` existed.
+#
+#   2. Resolve the pin to a concrete commit by trying, in order:
+#        a. refs/remotes/origin/<pin>   -- a remote branch
+#        b. <pin>                       -- a local commit / tag / branch
+#      and reset HARD to that commit. Hard-reset (vs. checkout) is the right
+#      primitive for a read-only Portage snapshot: gentoo-mirror periodically
+#      force-pushes when its CVS->git mirror rewrites history, which leaves
+#      local branches diverged ([ahead 1, behind 1]) and refuses --ff-only
+#      pulls. We don't preserve local commits in this checkout.
+#
+# Persists the resolved commit to $SHARED_DIR/portage-tree.commit.
+_set_tree_pin() {
+  local requested="${1:-}"
+  local pin
+
+  if [[ -n "$requested" ]]; then
+    pin="$requested"
   else
-    log_info "cloning Portage tree from $PORTAGE_TREE_URL"
-    if [[ -n "$PORTAGE_TREE_PIN" ]]; then
-      git clone "$PORTAGE_TREE_URL" "$TREE_DIR"
-    else
-      git clone --depth=1 "$PORTAGE_TREE_URL" "$TREE_DIR"
+    pin="$(git -C "$TREE_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null \
+            | sed 's|^origin/||')"
+    if [[ -z "$pin" ]]; then
+      # Fallback if origin/HEAD is missing (e.g. ancient git or shallow clone
+      # without remote.origin.HEAD). Try `stable` then `master` -- in that
+      # order because stable is the post-2026 gentoo-mirror default.
+      for cand in stable master; do
+        if git -C "$TREE_DIR" rev-parse --verify "refs/remotes/origin/$cand" >/dev/null 2>&1; then
+          pin="$cand"; break
+        fi
+      done
     fi
+    [[ -n "$pin" ]] || die "could not resolve a default branch for $TREE_DIR"
+    log_info "no pin given; using origin's default branch: $pin"
   fi
-  if [[ -n "$PORTAGE_TREE_PIN" ]]; then
-    log_info "pinning tree to $PORTAGE_TREE_PIN"
-    git -C "$TREE_DIR" checkout "$PORTAGE_TREE_PIN"
+
+  # Update remote-tracking refs first. The first attempt is the cheapest
+  # (depth-1 update of just the requested ref); we fall back to a full
+  # fetch and finally to --unshallow for repos that need deeper history
+  # to resolve $pin.
+  git -C "$TREE_DIR" fetch --no-show-forced-updates origin "$pin" 2>/dev/null \
+    || git -C "$TREE_DIR" fetch --no-show-forced-updates origin 2>/dev/null \
+    || git -C "$TREE_DIR" fetch --unshallow origin
+
+  local target=""
+  if git -C "$TREE_DIR" rev-parse --verify "refs/remotes/origin/$pin" >/dev/null 2>&1; then
+    target="refs/remotes/origin/$pin"
+  elif git -C "$TREE_DIR" rev-parse --verify "$pin" >/dev/null 2>&1; then
+    target="$pin"
+  else
+    die "cannot resolve pin '$pin' as either origin/<branch> or commit/tag in $TREE_DIR"
   fi
+
+  log_info "resetting $TREE_DIR to $target"
+  git -C "$TREE_DIR" reset --hard "$target" >/dev/null
+
   local pin_commit
   pin_commit="$(git -C "$TREE_DIR" rev-parse HEAD)"
   printf '%s\n' "$pin_commit" >"$SHARED_DIR/portage-tree.commit"
   log_ok "tree pinned at $pin_commit"
+}
+
+bootstrap_pin_tree() {
+  if [[ -d "$TREE_DIR/.git" ]]; then
+    log_info "tree already cloned at $TREE_DIR; fetching"
+  else
+    log_info "cloning Portage tree from $PORTAGE_TREE_URL"
+    # Always shallow-clone the default branch initially; _set_tree_pin will
+    # unshallow on demand if PORTAGE_TREE_PIN points at older history.
+    git clone --depth=1 "$PORTAGE_TREE_URL" "$TREE_DIR"
+  fi
+
+  _set_tree_pin "$PORTAGE_TREE_PIN"
 }
 
 bootstrap_post_stage3() {
@@ -1118,9 +1176,40 @@ _patch_portage_ng_host_config() {
     fi
   done
   if [[ -z "$host_cfg" ]]; then
-    log_warn "no Source/Config/<host>.pl found in baseline; skipping binpkg_refresh override"
+    log_warn "no Source/Config/<host>.pl found in baseline; skipping deploy patches"
     return 0
   fi
+
+  # Patch 1: rewrite binpkg repo paths to the in-chroot canonical path.
+  #
+  # Upstream vm-linux.local.pl ships `binpkg:init('/srv/tinderbox-ng/shared/
+  # binpkgs', ...)` -- a HOST path. portage-ng running inside the baseline
+  # chroot (refresh-kb) or inside a session (compare runs) sees no such
+  # path: tinderbox-ng binds the shared binpkgs dir to `/var/cache/binpkgs`
+  # in both contexts (matching Portage's PKGDIR + the FHS expectation).
+  # With the upstream paths, refresh-kb logs
+  #   No Packages index at /srv/tinderbox-ng/shared/binpkgs/Packages
+  # and the resulting kb.qlf has zero binpkg variants. Sessions hit the
+  # same blind spot: the planner cannot use the binpkg cache to short-
+  # circuit source builds because portage-ng's binpkg repository is empty.
+  #
+  # The deploy fix is to swap the host-form paths for the in-chroot form
+  # in the host config. We patch the deployed copy (post-rsync) rather
+  # than upstream so portage-ng-core stays generic; the contract that
+  # tinderbox-ng owns the in-chroot mount layout is already documented.
+  #
+  # Idempotent: if the file already uses the in-chroot path (i.e. an
+  # operator manually fixed it, or a future portage-ng release adopts
+  # the change), the sed substitution is a no-op.
+  if grep -q "'/srv/tinderbox-ng/shared/binpkgs" "$host_cfg"; then
+    sed -i \
+      -e "s|'/srv/tinderbox-ng/shared/binpkgs/Packages'|'/var/cache/binpkgs/Packages'|g" \
+      -e "s|'/srv/tinderbox-ng/shared/binpkgs'|'/var/cache/binpkgs'|g" \
+      "$host_cfg"
+    log_info "  $host_cfg: rewrote binpkg paths to in-chroot /var/cache/binpkgs"
+  fi
+
+  # Patch 2: append config:binpkg_refresh(mtime) override (idempotent).
   if grep -qE '^[[:space:]]*config:binpkg_refresh\b' "$host_cfg"; then
     log_info "  $host_cfg: config:binpkg_refresh already set; leaving alone"
     return 0
@@ -1200,20 +1289,17 @@ EOF
 
 cmd_refresh_tree() {
   require_root
-  local pin="${1:-master}"
+  # Default to origin/HEAD (currently `stable` on gentoo-mirror, was `master`
+  # pre-2026) by passing an empty pin to _set_tree_pin. Operators can still
+  # pass an explicit branch / tag / commit positional arg.
+  local pin="${1:-}"
 
   [[ -d "$TREE_DIR/.git" ]] || die "$TREE_DIR is not a git checkout"
 
-  log_info "refreshing tree to $pin"
-  git -C "$TREE_DIR" fetch origin "$pin" 2>/dev/null \
-    || git -C "$TREE_DIR" fetch --unshallow origin 2>/dev/null \
-    || git -C "$TREE_DIR" fetch origin
-  git -C "$TREE_DIR" checkout "$pin"
-  git -C "$TREE_DIR" rev-parse HEAD >"$SHARED_DIR/portage-tree.commit"
+  _set_tree_pin "$pin"
 
   log_warn "tree changed; existing sessions still see the OLD bind until reset"
   log_warn "kb.qlf is now stale; run 'tinderbox-ng refresh-kb' to regenerate"
-  log_ok "tree refreshed to $(cat "$SHARED_DIR/portage-tree.commit")"
 }
 
 # =============================================================================
@@ -2975,6 +3061,20 @@ _ns_baseline_mount() {
   fi
 
   _mount_quiet --bind "$DISTFILES_DIR" "$M$CHROOT_DISTFILES_PATH"
+
+  # Bind the shared binpkgs cache so portage-ng's `--sync` (run via refresh-kb
+  # and bootstrap_install_kb_qlf) can read the on-disk Packages index when it
+  # builds kb.qlf. Without this bind, refresh-kb logs
+  #   No Packages index at /var/cache/binpkgs/Packages -- registering empty
+  #   binpkg repository.
+  # and the resulting kb.qlf has zero binpkg variants, which makes the
+  # planner blind to pre-existing binpkgs every time the kb is regenerated.
+  # Mirrors _ns_session_mount's binpkgs bind so the in-chroot path is the
+  # same canonical /var/cache/binpkgs in both contexts.
+  if [[ -d "$BINPKGS_DIR" ]]; then
+    install -d "$M$CHROOT_BINPKGS_PATH"
+    _mount_quiet --bind "$BINPKGS_DIR" "$M$CHROOT_BINPKGS_PATH"
+  fi
 
   # DNS bind - same caveat as session: don't truncate, just create if missing.
   if [[ ! -e "$M/etc/resolv.conf" ]]; then
