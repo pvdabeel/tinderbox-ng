@@ -260,8 +260,29 @@ checkout (against the pinned commit `26069d06`):
   `/usr/portage`, `pkg` at `/var/db/pkg`, `distfiles` at
   `/var/cache/distfiles`, and the binpkg cache at
   `/srv/tinderbox-ng/shared/binpkgs`. These match the in-chroot mount
-  points used by `tinderbox-ng` exactly. **No edit to that file is
-  needed.**
+  points used by `tinderbox-ng` exactly.
+- `bootstrap` and `refresh-portage-ng` both append a tinderbox-ng-owned
+  override block to that host config that flips portage-ng's default
+  `config:binpkg_refresh(manual)` to `mtime` (declaring the predicate
+  dynamic and retracting the upstream fact first, so the override
+  survives any once/1 or first-fact-wins consumer). Without `mtime`,
+  long-running `compare-matrix --jobs N` workers never see binpkgs
+  their siblings just produced via `FEATURES=buildpkg`, so the matrix
+  tail re-builds packages from source even though they're sitting in
+  the shared `Packages` index. See `_patch_portage_ng_host_config` in
+  `bin/tinderbox-ng`. The override is idempotent: if the host config
+  already declares `config:binpkg_refresh/1` (e.g. an operator
+  deliberately set `manual`), tinderbox-ng leaves it alone.
+
+  Caveat (as of pinned commit `26069d06`): portage-ng documents the
+  `manual|mtime` contract in `Source/config.pl` and
+  `Source/Domain/Gentoo/Binpkg/binpkg_exec.pl` pldoc, but
+  `binpkg_exec:available_for/4` does **not** yet consult
+  `config:binpkg_refresh/1` — the dispatch is still TODO upstream. The
+  override is the correct policy for the day the consumer lands; until
+  then it is a harmless no-op and the matrix continues to see only the
+  binpkgs that existed at session start. The fix for that symptom
+  belongs in `pvdabeel/portage-ng`, not here.
 - `Source/config.pl` pins
   `config:pkg_directory('vm-linux.local','/var/db/pkg')` — the chroot's
   own VDB, which lives in the session's upper layer.

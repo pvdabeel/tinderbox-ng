@@ -1007,7 +1007,100 @@ EOF
 
   install -m 0755 "$LIB_DIR/run-matrix.sh" "$BASELINE_DIR/usr/local/bin/tinderbox-matrix"
 
+  _patch_portage_ng_host_config
+
   log_ok "portage-ng installed at $CHROOT_PORTAGE_NG"
+}
+
+# Tinderbox-ng-owned override of portage-ng's host-specific config to
+# flip policies that matter for matrix-style concurrent buildpkg
+# producers but not for solo portage-ng use.
+#
+# Currently sets:
+#   config:binpkg_refresh(mtime)
+#
+# Background: portage-ng's repo-level Source/config.pl ships
+# `config:binpkg_refresh(manual).` (cheapest, fully predictable). With
+# FEATURES=buildpkg in baseline.make.conf and the shared binpkgs dir
+# bind-mounted into every session, sibling compare-matrix workers
+# regenerate the on-disk `Packages` index continuously. Long-running
+# `--build` workers under `manual` keep the in-memory index they loaded
+# at process start and never see binpkgs their siblings produced after
+# launch -- forcing redundant source builds in the matrix tail.
+# `mtime` is documented in portage-ng's config.pl pldoc as the policy
+# that re-syncs the in-memory index from `Packages` when its mtime
+# advances, which is the "live tinderbox/matrix" case.
+#
+# We patch the deployed host-specific config (Source/Config/<host>.pl)
+# instead of the repo-level config.pl, so:
+#   - upstream portage-ng users keep the conservative `manual` default
+#   - tinderbox-ng owns the policy bump on the boxes it deploys
+#   - re-running refresh-portage-ng (which rsyncs all of Source/) just
+#     overwrites the file with the upstream copy and we re-apply here
+#
+# Predicate semantics: `config:binpkg_refresh/1` is loaded as a single
+# fact in upstream config.pl (no `:- multifile` / `:- dynamic`), and the
+# host config in Source/Config/<host>.pl is consulted AFTER config.pl
+# during init_knowledgebase (portage-ng.pl:115). So just appending a
+# second fact would leave the older `manual` clause in place and lose
+# under any consumer that uses `once/1` or matches the head literally.
+# We therefore declare the predicate dynamic, retract any existing
+# clauses, then assert `mtime` -- which works under all three plausible
+# upstream consumer regimes (first-asserted, last-asserted, only-one).
+#
+# NOTE: as of portage-ng pin 26069d06, `binpkg_exec:available_for/4`
+# does NOT consult `config:binpkg_refresh/1` yet -- the doc-comment
+# advertises the contract but the dispatch hasn't been wired. Our
+# override is the right policy for the day the consumer lands; until
+# then it is a harmless no-op and the matrix continues to see only the
+# binpkgs that existed at session start. Track upstream for the wiring.
+#
+# Idempotent: if the host config already declares config:binpkg_refresh/1
+# (any policy, e.g. an operator deliberately wants `manual`), leave it
+# alone -- so an operator-side override always wins. The chroot inherits
+# the host's UTS namespace, so we look up <host>.pl by `hostname`, with a
+# `vm-linux.local.pl` fallback to match the rest of the bootstrap which
+# hardcodes that label (e.g. the empty world file).
+_patch_portage_ng_host_config() {
+  local host_short host_cfg="" cand
+  host_short="$(hostname)"
+  for cand in "$host_short" "vm-linux.local"; do
+    if [[ -f "$BASELINE_DIR$CHROOT_PORTAGE_NG/Source/Config/${cand}.pl" ]]; then
+      host_cfg="$BASELINE_DIR$CHROOT_PORTAGE_NG/Source/Config/${cand}.pl"
+      break
+    fi
+  done
+  if [[ -z "$host_cfg" ]]; then
+    log_warn "no Source/Config/<host>.pl found in baseline; skipping binpkg_refresh override"
+    return 0
+  fi
+  if grep -qE '^[[:space:]]*config:binpkg_refresh\b' "$host_cfg"; then
+    log_info "  $host_cfg: config:binpkg_refresh already set; leaving alone"
+    return 0
+  fi
+  cat >>"$host_cfg" <<'EOF'
+
+% --- tinderbox-ng deploy override ---------------------------------------------
+% Override portage-ng's default config:binpkg_refresh(manual) for the
+% tinderbox/matrix scenario: sibling compare sessions regenerate the
+% shared Packages index mid-run via FEATURES=buildpkg. `mtime` re-syncs
+% the in-memory index when the on-disk file changes, so long-running
+% workers pick up binpkgs produced by their siblings instead of
+% redundantly source-building them.
+%
+% This file is consulted AFTER Source/config.pl, so we must explicitly
+% retract the upstream `manual` fact before asserting `mtime` -- otherwise
+% any once/1 consumer would still see the older clause. Declaring the
+% predicate dynamic first lets retractall succeed even though config.pl
+% loaded it as a static fact.
+%
+% Re-applied by tinderbox-ng on every refresh-portage-ng; see
+% bin/tinderbox-ng:_patch_portage_ng_host_config for rationale.
+:- dynamic(config:binpkg_refresh/1).
+:- retractall(config:binpkg_refresh(_)).
+config:binpkg_refresh(mtime).
+EOF
+  log_info "  $host_cfg: appended config:binpkg_refresh(mtime) override"
 }
 
 bootstrap_install_kb_qlf() {
@@ -1176,6 +1269,12 @@ EOF
   if [[ ! -f "$BASELINE_DIR$CHROOT_PORTAGE_NG/Source/Knowledge/Sets/world/vm-linux.local" ]]; then
     : >"$BASELINE_DIR$CHROOT_PORTAGE_NG/Source/Knowledge/Sets/world/vm-linux.local"
   fi
+
+  # The rsync above re-overwrites Source/Config/<host>.pl with whatever
+  # is in the upstream checkout, dropping any tinderbox-ng-owned policy
+  # overrides (notably config:binpkg_refresh(mtime), required for the
+  # matrix runner). Re-apply.
+  _patch_portage_ng_host_config
 
   log_ok "portage-ng refreshed in baseline; new sessions will pick it up"
   log_warn "existing sessions still see the OLD portage-ng until reset"
