@@ -47,8 +47,16 @@ def load_tsv(path: Path) -> list[dict]:
 # tabular metrics, a "First error/warning per engine" section, and a
 # "VDB delta (after build)" section. We parse this to determine whether
 # the *target* package itself was actually built+merged, distinct from
-# "pipeline exit code stayed 0". This catches silent-failure bugs in
-# portage-ng where a sub-step fails but the overall exit is 0.
+# "pipeline exit code stayed 0". This was originally written to catch a
+# silent-failure class of bug in portage-ng where a sub-step fails but
+# the overall exit stays 0; that bug is closed upstream as of
+# portage-ng commit 8deb4131 ("builder: VDB reconciliation backstop +
+# close --ci exit-code leaks"), which pulls the same `real_pn_built` /
+# `parse_vdb_delta` invariant into the engine itself so the bug cannot
+# escape the process exit code in the first place. We keep the
+# post-hoc check as a regression backstop: if a future refactor opens
+# a new exit-code leak, the matrix report will surface it before
+# anyone notices in the field.
 
 _FIRSTERR_RE = re.compile(
     r"portage-ng:.*FAIL.*install portage://([^\s]+)")
@@ -330,15 +338,18 @@ def render(pretend: Optional[list[dict]],
         b_silent_count = summary_metrics(build)["pn_silent"]
         if b_silent_count > 0:
             parts.append(f"- **{b_silent_count} portage-ng silent failures**: pipeline "
-                         "exited 0 but the target was never merged into VDB. Hits a known "
-                         "regression of the action:maybe_ci_exit_on_build_failure/1 guard; "
-                         "see the dedicated section below for the package list.")
+                         "exited 0 but the target was never merged into VDB. The "
+                         "VDB-reconciliation backstop landed upstream in commit "
+                         "`8deb4131` should have caught this -- if you see this row, "
+                         "a regression has reopened an exit-code leak in the engine. "
+                         "See the dedicated section below for the package list.")
         else:
             parts.append("- **0 portage-ng silent failures**: every package whose pipeline "
-                         "exited 0 also landed the target in VDB. The earlier "
-                         "`maybe_ci_exit_on_build_failure/1` regression that produced "
-                         "12/65 silent failures in the 2026-05-09 matrix is no longer "
-                         "observable.\n")
+                         "exited 0 also landed the target in VDB. The upstream "
+                         "VDB-reconciliation backstop (commit `8deb4131`) is holding; "
+                         "the earlier `maybe_ci_exit_on_build_failure/1` regression "
+                         "that produced 12/65 silent failures in the 2026-05-09 matrix "
+                         "is no longer observable.\n")
 
     if b_pn_only_wins:
         parts.append("### portage-ng-only build wins\n")

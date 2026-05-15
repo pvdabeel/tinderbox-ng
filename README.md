@@ -283,7 +283,7 @@ rewrites `/etc/ccache.conf`, and re-freezes.
 ## portage-ng integration
 
 Verified facts from the [`portage-ng`](https://github.com/pvdabeel/portage-ng)
-checkout (against the pinned commit `26069d06`):
+checkout (against commit `8deb4131`):
 
 - `Source/Config/vm-linux.local.pl` registers `portage` at
   `/usr/portage`, `pkg` at `/var/db/pkg`, `distfiles` at
@@ -303,15 +303,18 @@ checkout (against the pinned commit `26069d06`):
   already declares `config:binpkg_refresh/1` (e.g. an operator
   deliberately set `manual`), tinderbox-ng leaves it alone.
 
-  Caveat (as of pinned commit `26069d06`): portage-ng documents the
-  `manual|mtime` contract in `Source/config.pl` and
-  `Source/Domain/Gentoo/Binpkg/binpkg_exec.pl` pldoc, but
-  `binpkg_exec:available_for/4` does **not** yet consult
-  `config:binpkg_refresh/1` — the dispatch is still TODO upstream. The
-  override is the correct policy for the day the consumer lands; until
-  then it is a harmless no-op and the matrix continues to see only the
-  binpkgs that existed at session start. The fix for that symptom
-  belongs in `pvdabeel/portage-ng`, not here.
+  Wired upstream as of portage-ng commit `76730972` ("binpkg: honor
+  `config:binpkg_refresh/1` in `available_for/4`"): every dispatch
+  probe now reads `config:binpkg_refresh/1`, and under `mtime` it
+  stats `$PKGDIR/Packages` and re-runs `binpkg:sync(kb)` whenever an
+  external producer (sibling matrix worker) has bumped the index.
+  Long-running `--build` workers therefore pick up newly-minted
+  binpkgs between probes instead of being frozen on the snapshot
+  loaded by `kb:register` at process start. Concurrent probes
+  serialize on a dedicated upstream-side mutex. Verified end-to-end
+  on 2026-05-15 with a `compare --build app-containers/dive` smoke:
+  binpkg short-circuit fires on every install action, completing in
+  ~2 minutes vs the prior multi-hour source-build path.
 - `Source/config.pl` pins
   `config:pkg_directory('vm-linux.local','/var/db/pkg')` — the chroot's
   own VDB, which lives in the session's upper layer.
@@ -338,12 +341,17 @@ at it. Always run `portage-ng-dev` from inside a `tinderbox-ng` session.
 notice the contract documented here is the API; breaking it requires
 coordinated changes to both repositories.
 
-**Pinned commit known to work:**
-[`pvdabeel/portage-ng@26069d06`](https://github.com/pvdabeel/portage-ng/tree/26069d06)
-— anything from this commit forward should work as long as the items
-below stay stable. If you bump the on-host portage-ng checkout past a
-known-incompatible commit and bootstrap fails, pin
-`PORTAGE_NG_REF=26069d06` (when using `PORTAGE_NG_URL`) until the
+**Lowest known-good commit:**
+[`pvdabeel/portage-ng@8deb4131`](https://github.com/pvdabeel/portage-ng/tree/8deb4131)
+— anything from this commit forward is verified end-to-end on the
+matrix harness, including the binpkg dispatch refresh policy
+([`76730972`](https://github.com/pvdabeel/portage-ng/commit/76730972))
+and the `--ci --build` VDB-reconciliation backstop
+([`8deb4131`](https://github.com/pvdabeel/portage-ng/commit/8deb4131)).
+Earlier extraction-era pin `26069d06` predates both fixes and is no
+longer recommended. If you bump the on-host portage-ng checkout past
+a known-incompatible commit and bootstrap fails, pin
+`PORTAGE_NG_REF=8deb4131` (when using `PORTAGE_NG_URL`) until the
 contract is restored.
 
 ### CLI surface
@@ -883,7 +891,7 @@ ships a particular `kb.qlf`, the resolver disagrees with `emerge`.
 | `PORTAGE_TREE_PIN` | (latest) | Pin to a specific commit at bootstrap. |
 | `PORTAGE_NG_URL` | (unset) | If set: `git clone`; else rsync from `PORTAGE_NG_LOCAL`. |
 | `PORTAGE_NG_LOCAL` | one of `/root/prolog`, `/opt/portage-ng`, `/opt/prolog` if it looks like a portage-ng checkout, else unset | Local portage-ng checkout to seed `/opt/portage-ng`. Bootstrap fails if neither this nor `PORTAGE_NG_URL` resolves. |
-| `PORTAGE_NG_REF` | `HEAD` | Ref to check out (only if `PORTAGE_NG_URL` set). Pin to `26069d06` for a known-compatible portage-ng. |
+| `PORTAGE_NG_REF` | `HEAD` | Ref to check out (only if `PORTAGE_NG_URL` set). Pin to `8deb4131` (or later) for a known-good portage-ng with binpkg refresh + VDB-reconciliation backstop landed. |
 | `GENTOO_PROFILE` | `default/linux/amd64/23.0/split-usr/no-multilib` | Must match `config:gentoo_profile/1`. |
 | `GENTOO_LOCALE` | `en_US.UTF-8 UTF-8` | Appended to `/etc/locale.gen`. |
 | `GENTOO_LOCALE_NAME` | `en_US.utf8` | Argument to `eselect locale set`. |

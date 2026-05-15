@@ -1177,12 +1177,19 @@ EOF
 # clauses, then assert `mtime` -- which works under all three plausible
 # upstream consumer regimes (first-asserted, last-asserted, only-one).
 #
-# NOTE: as of portage-ng pin 26069d06, `binpkg_exec:available_for/4`
-# does NOT consult `config:binpkg_refresh/1` yet -- the doc-comment
-# advertises the contract but the dispatch hasn't been wired. Our
-# override is the right policy for the day the consumer lands; until
-# then it is a harmless no-op and the matrix continues to see only the
-# binpkgs that existed at session start. Track upstream for the wiring.
+# Wired upstream as of portage-ng commit 76730972 ("binpkg: honor
+# config:binpkg_refresh/1 in available_for/4"). Each dispatch probe in
+# `binpkg_exec:available_for/4` now reads `config:binpkg_refresh/1`:
+# under `mtime` it stats $PKGDIR/Packages and re-runs `binpkg:sync(kb)`
+# whenever an external producer (sibling matrix worker) has bumped the
+# index, so a long-running `--build` worker picks up newly-minted
+# binpkgs between probes instead of being frozen on the snapshot it
+# loaded at process start. Concurrent probes serialize on a dedicated
+# `binpkg_exec_refresh` mutex upstream-side, so we don't have to
+# coordinate here. Verified end-to-end on 2026-05-15 with a
+# `compare --build app-containers/dive` smoke: planner emits 7 source
+# actions but the executor short-circuits each install through qmerge,
+# completing in ~2 minutes vs the multi-hour source-build path.
 #
 # Idempotent: if the host config already declares config:binpkg_refresh/1
 # (any policy, e.g. an operator deliberately wants `manual`), leave it
