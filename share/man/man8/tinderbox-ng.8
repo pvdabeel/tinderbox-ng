@@ -208,6 +208,30 @@ AND
 on the same target in parallel, print a side\-by\-side summary (exit codes,
 plan size, completed steps, VDB delta, first error). Default:
 .BR \-\-pretend .
+The
+.B exit
+column carries one of:
+.B OK
+(rc 0),
+.B OK(cycles)
+(portage\-ng rc 1),
+.B OK(assumed)
+(portage\-ng rc 2),
+.B TIMEOUT
+(rc 124,
+.BR timeout (1)),
+.B KILLED(SIGKILL)
+(rc 137, almost always OOM in the matrix),
+.B KILLED(SIGTERM)
+(rc 143),
+.B RESTRICT(fetch)
+(ebuild needs a manual download), or
+.BI FAIL( N )
+for any other non\-zero exit code.
+The plan and build passes have separate timeouts \(em see
+.B TINDERBOX_PLAN_TIMEOUT
+and
+.BR TINDERBOX_BUILD_TIMEOUT .
 With
 .BR \-\-keep ,
 the session upper layers are preserved at
@@ -532,6 +556,29 @@ Cap for the shared
 .B TINDERBOX_KERNEL_PACKAGE
 Kernel\-source package emerged into the baseline (default
 .BR sys\-kernel/gentoo\-sources ).
+The installed source tree is also configured with
+.B make defconfig
+and
+.B make modules_prepare
+so
+.B linux\-mod
+ebuilds (e.g. nvidia\-drivers, vhba, ryzen_smu, lkrg,
+virtualbox\-guest\-modules) satisfy
+.BR linux\-info_pkg_setup ()
+inside sessions.
+.TP
+.B TINDERBOX_PLAN_TIMEOUT
+Per\-package planning timeout in seconds for
+.B compare
+(default 1800). Capped at
+.BR TINDERBOX_BUILD_TIMEOUT .
+.TP
+.B TINDERBOX_BUILD_TIMEOUT
+Per\-package build timeout in seconds for
+.B compare
+(default 14400, i.e. 4 hours) and for the
+.BR pn / em
+standalone runs.
 .TP
 .B TINDERBOX_MDNS_HOSTS
 Space\-separated hostnames that must resolve from inside the chroot (the

@@ -1105,6 +1105,20 @@ if eselect kernel list 2>/dev/null | grep -qE '^[[:space:]]*\['; then
 else
   echo "warn: eselect kernel found no installed kernel sources" >&2
 fi
+# Configure the tree so linux-mod-r1 ebuilds (nvidia-drivers,
+# vhba, ryzen_smu, virtualbox-guest-modules, lkrg, scap-driver, ...)
+# pass their pkg_setup() check, which reads /usr/src/linux/.config and
+# /usr/src/linux/include/generated/autoconf.h. Without this the entire
+# out-of-tree-module cluster fails fail/fail in the matrix even though
+# both engines plan correctly. defconfig + modules_prepare is the
+# minimum that satisfies linux-info_pkg_setup().
+if [[ -L /usr/src/linux ]] && [[ ! -f /usr/src/linux/.config ]]; then
+  echo "configuring kernel sources for linux-mod ebuilds"
+  pushd "\$(readlink -f /usr/src/linux)" >/dev/null
+  make -s defconfig
+  make -s -j"\$(nproc)" modules_prepare
+  popd >/dev/null
+fi
 EOF
   log_ok "kernel sources installed; /usr/src/linux symlink set in baseline"
 }
@@ -2041,15 +2055,31 @@ cmd_compare() {
   # us archive the resolver output and the build output separately,
   # which is exactly what an operator wants when triaging a build
   # failure: was it the plan that diverged, or the execution?
-  local TO="${TINDERBOX_BUILD_TIMEOUT:-7200}"
-  local pn_plan_cmd="cd /opt/portage-ng && timeout $TO ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci --pretend $target"
-  local pn_build_cmd="cd /opt/portage-ng && timeout $TO ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci --build $target"
-  local em_plan_cmd="timeout $TO /usr/bin/emerge --color=n --oneshot --verbose --pretend $target"
+  # Split timeouts: planning is bounded (resolver is CPU only, never waits
+  # on the network or compilers), the build pass can chase pathologically
+  # large source trees (libreoffice, dev-lang/pypy, dev-lang/spark,
+  # everything in dev-ada/*, all sequoia-* crates, …). Running both passes
+  # under one fat timeout means a slow planner can starve the build, or a
+  # legitimate-but-long build trips the planner-tuned ceiling.
+  # TINDERBOX_BUILD_TIMEOUT preserves the legacy single-knob default
+  # (7200s) but is now used as the build-pass timeout only; if an operator
+  # bumps it, both engines see the new value. TINDERBOX_PLAN_TIMEOUT is
+  # new and defaults to 1800s; if an operator already set
+  # TINDERBOX_BUILD_TIMEOUT explicitly we still honour that as the upper
+  # bound for the plan pass (`min(plan_default, build)` semantics) so we
+  # don't surprise anyone who tightened the legacy single-knob to a small
+  # value to bound a quick smoke matrix.
+  local BUILD_TO="${TINDERBOX_BUILD_TIMEOUT:-14400}"
+  local PLAN_TO="${TINDERBOX_PLAN_TIMEOUT:-1800}"
+  if (( PLAN_TO > BUILD_TO )); then PLAN_TO="$BUILD_TO"; fi
+  local pn_plan_cmd="cd /opt/portage-ng && timeout $PLAN_TO ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci --pretend $target"
+  local pn_build_cmd="cd /opt/portage-ng && timeout $BUILD_TO ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci --build $target"
+  local em_plan_cmd="timeout $PLAN_TO /usr/bin/emerge --color=n --oneshot --verbose --pretend $target"
   # PORTAGE_LOGDIR=/var/log/portage makes Portage retain a per-ebuild log
   # at /var/log/portage/<cat>:<pf>:<ts>.log even when FEATURES=clean wipes
   # the build temp dir on successful merge. _compare_salvage_target_buildlog
   # picks the target's log out of there before the session is destroyed.
-  local em_build_cmd="PORTAGE_LOGDIR=/var/log/portage timeout $TO /usr/bin/emerge --color=n --oneshot --verbose $target"
+  local em_build_cmd="PORTAGE_LOGDIR=/var/log/portage timeout $BUILD_TO /usr/bin/emerge --color=n --oneshot --verbose $target"
 
   # Forks; we don't use cmd_exec here to avoid its `exit` at the end
   # (we want both halves to finish and then summarize).
@@ -2192,12 +2222,39 @@ _compare_summarize() {
   # standard 0=success/non-zero=failure convention.
   local pn_status em_status
   case "$pn_rc" in
-    0) pn_status="OK" ;;
-    1) pn_status="OK(cycles)" ;;
-    2) pn_status="OK(assumed)" ;;
-    *) pn_status="FAIL($pn_rc)" ;;
+    0)   pn_status="OK" ;;
+    1)   pn_status="OK(cycles)" ;;
+    2)   pn_status="OK(assumed)" ;;
+    124) pn_status="TIMEOUT" ;;
+    137) pn_status="KILLED(SIGKILL)" ;;   # almost always OOM in the matrix
+    143) pn_status="KILLED(SIGTERM)" ;;
+    *)   pn_status="FAIL($pn_rc)" ;;
   esac
-  if [[ "$em_rc" == "0" ]]; then em_status="OK"; else em_status="FAIL($em_rc)"; fi
+  case "$em_rc" in
+    0)   em_status="OK" ;;
+    124) em_status="TIMEOUT" ;;
+    137) em_status="KILLED(SIGKILL)" ;;
+    143) em_status="KILLED(SIGTERM)" ;;
+    *)   em_status="FAIL($em_rc)" ;;
+  esac
+
+  # Reclassify fetch-restricted ebuilds (RESTRICT="fetch" or RESTRICT="mirror"
+  # with no upstream binary mirror, e.g. app-arch/stuffit, app-office/moneydance,
+  # dev-db/sqldeveloper, app-office/worklog-assistant-bin) as RESTRICT(fetch)
+  # rather than FAIL(N). These aren't real failures: the package metadata
+  # explicitly requires a manual download. Reading both engines' build logs
+  # for the documented marker is cheap and lets results.tsv distinguish
+  # "package broken" from "rig can't auto-download".
+  #
+  # Marker shapes seen in the wild:
+  #   portage-ng: "[step N] FAIL (manual fetch required) download portage://..."
+  #   emerge:     "Fetch failed for '<cat>/<pf>'" / ">>> Please download files manually"
+  if [[ -f "$pn_build_log" ]] && grep -aqE 'FAIL \(manual fetch required\)' "$pn_build_log" 2>/dev/null; then
+    pn_status="RESTRICT(fetch)"
+  fi
+  if [[ -f "$em_build_log" ]] && grep -aqE 'Please download files manually|Fetch failed for ' "$em_build_log" 2>/dev/null; then
+    em_status="RESTRICT(fetch)"
+  fi
 
   # portage-ng renders with ANSI color codes, so we strip them before matching.
   # ESC[...m sequences appear around numbers in lines like "Total: \e[32m16\e[00m completed."
@@ -4131,7 +4188,20 @@ Environment:
   TINDERBOX_KERNEL_PACKAGE        Kernel-source package emerged into the
                                   baseline (default sys-kernel/gentoo-sources).
                                   Read by bootstrap_install_kernel_sources and
-                                  the `install-kernel-sources` retrofit.
+                                  the `install-kernel-sources` retrofit. The
+                                  installed tree is also `make defconfig`'d
+                                  + `modules_prepare`'d so linux-mod ebuilds
+                                  (nvidia-drivers, vhba, ryzen_smu, lkrg,
+                                  virtualbox-guest-modules, ...) pass their
+                                  pkg_setup() check inside sessions.
+  TINDERBOX_PLAN_TIMEOUT          Per-package planning timeout in seconds
+                                  (default 1800). Used by `compare`'s
+                                  --pretend pass for both engines. Capped
+                                  at TINDERBOX_BUILD_TIMEOUT.
+  TINDERBOX_BUILD_TIMEOUT         Per-package build timeout in seconds
+                                  (default 14400 = 4h). Used by `compare`'s
+                                  --build pass for both engines, and by
+                                  `pn`/`em` standalone runs.
   TINDERBOX_LIBEXEC_DIR           Override location of executable helpers
                                   (default $SCRIPT_DIR/../libexec/tinderbox-ng).
   TINDERBOX_SHARE_DIR             Override location of data templates

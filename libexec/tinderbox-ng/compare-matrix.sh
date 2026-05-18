@@ -175,7 +175,14 @@ _run_one() {
   local pkg="$2"
   local total="$3"
   local label log start rc elapsed
-  label="${LABEL_PREFIX}$(printf '%s' "$pkg" | tr -c '[:alnum:]' '_' | sed 's/^_*//;s/_*$//')"
+  # Sanitize cp -> filesystem-safe label. We translate `+` to `p` BEFORE
+  # collapsing the rest to `_` so that names ending in `++` (mysql++,
+  # lmdb++, mysql-connector-c++, bonnie++, ...) survive as distinct
+  # labels (`mysql_pp`, `mysql_connector_cpp`) instead of colliding with
+  # their non-`++` sibling (e.g. `mysql-connector-c` and
+  # `mysql-connector-c++` both used to map to `mysql_connector_c`,
+  # producing a `?|?` row in results.tsv whenever both ran).
+  label="${LABEL_PREFIX}$(printf '%s' "$pkg" | tr '+' 'p' | tr -c '[:alnum:]' '_' | sed 's/^_*//;s/_*$//')"
   log="$OUTDIR/${label}.log"
 
   local cmp_args=("$MODE" --label "$label")
