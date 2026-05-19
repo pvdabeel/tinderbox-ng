@@ -34,3 +34,8 @@ If we put everything together I believe it would be quite straightforward to shi
 We have already proven that portage-ng phas a planning correctness exceeding 100% (it produces plans there where emerge cannot)
 We are now doing the same with tinderbox-ng (testing at least 100% build correctness).
 Once this is done, we start integration in portage-ng.
+
+- Separate path for binary installs (no bdepend) -> I prefer not. Deploying as if we had build from source seems more correct
+
+
+
