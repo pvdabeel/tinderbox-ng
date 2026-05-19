@@ -225,7 +225,15 @@ column carries one of:
 .B KILLED(SIGTERM)
 (rc 143),
 .B RESTRICT(fetch)
-(ebuild needs a manual download), or
+(ebuild needs a manual download),
+.B INFRA(overlay\-inode\-flicker)
+(gtar bailed with
+.RB \(dq "Directory renamed before its status could be extracted" \(dq
+during unpack \(em a documented OverlayFS bug under inode\-cache reclaim
+pressure; mostly mitigated by the per\-session
+.I /var/tmp/portage
+bind\-mount, but residual occurrences are tagged this way for accounting),
+or
 .BI FAIL( N )
 for any other non\-zero exit code.
 The plan and build passes have separate timeouts \(em see

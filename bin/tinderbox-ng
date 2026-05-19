@@ -284,6 +284,16 @@ _ensure_sessions_tmpfs() {
 session_dir()    { printf '%s/%s' "$SESSIONS_DIR" "$1"; }
 session_upper()  { printf '%s/%s/upper' "$SESSIONS_DIR" "$1"; }
 session_work()   { printf '%s/%s/work' "$SESSIONS_DIR" "$1"; }
+# session_portage_tmpdir is the per-session scratch directory bind-mounted
+# at /var/tmp/portage inside the chroot. Lives ALONGSIDE upper/work, NOT
+# under upper/, so it bypasses the overlay layer entirely — gtar's
+# verify-after-create lstat() sees stable inodes from the underlying tmpfs
+# instead of the overlay's inode-cache-reclaim flicker that produces
+# "Directory renamed before its status could be extracted" on tarballs
+# with many entries (mesa, librsvg, glib). Salvage helpers read from
+# here directly; cmd_destroy wipes the whole session_dir so no extra
+# cleanup is needed.
+session_portage_tmpdir() { printf '%s/%s/portage_tmpdir' "$SESSIONS_DIR" "$1"; }
 session_merged() { printf '%s/%s/merged' "$SESSIONS_DIR" "$1"; }
 session_logs()   { printf '%s/%s/logs' "$SESSIONS_DIR" "$1"; }
 session_lock()   { printf '%s/%s/.lock' "$SESSIONS_DIR" "$1"; }
@@ -401,6 +411,29 @@ _ns_session_mount() {
   if [[ -d "$BINPKGS_DIR" ]]; then
     mkdir -p "$merged$CHROOT_BINPKGS_PATH"
     _mount_quiet --bind "$BINPKGS_DIR" "$merged$CHROOT_BINPKGS_PATH"
+  fi
+
+  # /var/tmp/portage as a fresh per-session bind-mount of a host-side
+  # scratch dir. Bypassing overlayfs here is the surgical fix for the
+  # gtar "Directory renamed before its status could be extracted" class
+  # of unpack failures: under inode-cache reclaim pressure (large-tarball
+  # extractions racing with sibling sessions' workdirs) overlay assigns
+  # fresh inode numbers to directories tar already recorded, and tar's
+  # post-create lstat() bails. The bind goes onto a separate vfsmount
+  # whose lookups never traverse the overlay layer, so inode numbers stay
+  # stable. See _compare_summarize's INFRA(overlay-inode-flicker)
+  # reclassifier for the matching telemetry.
+  #
+  # The scratch dir is created in cmd_new (chmod 2775, chown 250:250)
+  # so PORTAGE_BUILDDIR=/var/tmp/portage/<cat>/<pf> is writable by the
+  # FEATURES=userpriv user inside the chroot. Salvage helpers
+  # (_compare_salvage_*) read from session_portage_tmpdir() directly
+  # since the host-side path persists after the namespace exits.
+  local portage_tmpdir
+  portage_tmpdir="$(session_portage_tmpdir "$name")"
+  if [[ -d "$portage_tmpdir" ]]; then
+    mkdir -p "$merged/var/tmp/portage"
+    _mount_quiet --bind "$portage_tmpdir" "$merged/var/tmp/portage"
   fi
 
   # DNS - bind so DHCP changes propagate. Target must exist. Stage3 ships
@@ -665,6 +698,34 @@ cmd_doctor() {
         warn=$((warn+1))
       fi
     done
+  fi
+
+  # vm.vfs_cache_pressure: drives how aggressively the kernel reclaims
+  # dentry/inode cache. Default on most distros is 100 (treat dcache equal
+  # to pagecache); under heavy matrix concurrency that triggers an
+  # OverlayFS bug where directory inodes flicker to fresh values mid-tar
+  # extraction, and gtar bails with "Directory renamed before its status
+  # could be extracted" (most often on large tarballs like
+  # mesa-26.0.5.tar.xz, librsvg-2.60.0.tar.xz, glib-2.88.1.tar.xz).
+  # 27 sessions in compare-matrix-20260515T222721 hit this; 26 of them on
+  # the pn side, where the layer-batched executor maximises inode-cache
+  # pressure on /var/tmp/portage. tinderbox-ng now bind-mounts a fresh
+  # tmpfs over /var/tmp/portage in every session (see _ns_session_mount),
+  # so this is a belt-and-braces signal — keep dentry/inode cache around
+  # so the residual rate stays at zero.
+  if [[ -r /proc/sys/vm/vfs_cache_pressure ]]; then
+    local vcp
+    vcp="$(cat /proc/sys/vm/vfs_cache_pressure 2>/dev/null)"
+    if [[ "$vcp" =~ ^[0-9]+$ ]] && (( vcp > 50 )); then
+      log_warn "vm.vfs_cache_pressure=$vcp (default 100); recommended <= 50 to reduce"
+      log_warn "  OverlayFS inode-cache reclaim during tar -x of large tarballs"
+      log_warn "  (mesa, librsvg, glib). Apply with:"
+      log_warn "    sysctl -w vm.vfs_cache_pressure=50"
+      log_warn "    echo 'vm.vfs_cache_pressure = 50' >> /etc/sysctl.d/50-tinderbox-ng.conf"
+      warn=$((warn+1))
+    else
+      log_ok "vm.vfs_cache_pressure=$vcp (<= 50; OverlayFS-friendly)"
+    fi
   fi
 
   # Baseline freeze-damage check (only meaningful when a baseline exists).
@@ -1587,6 +1648,13 @@ cmd_new() {
 
   install -d "$(session_upper "$name")" "$(session_work "$name")" \
              "$(session_merged "$name")" "$(session_logs "$name")"
+  # /var/tmp/portage scratch space, off-overlay (see session_portage_tmpdir
+  # docstring). Mode 2775 + portage:portage (uid 250 in stage3) mirrors
+  # the canonical /var/tmp/portage perms emerge expects when running
+  # phases under FEATURES=userpriv. Numeric chown so this works on hosts
+  # that don't have a `portage` user defined.
+  install -d -m 2775 "$(session_portage_tmpdir "$name")"
+  chown 250:250 "$(session_portage_tmpdir "$name")" 2>/dev/null || true
   printf '%s\n' "created=$(date -Iseconds)" >"$(session_dir "$name")/info"
   log_ok "session '$name' created"
 }
@@ -1815,8 +1883,15 @@ _compare_salvage_target_buildlog() {
     # that survives -- the fallback only fires for binpkg merges or
     # for failed source builds whose workdir survives by virtue of the
     # failure.
+    #
+    # /var/tmp/portage is a per-session bind-mount of
+    # session_portage_tmpdir() (overlay-bypass; see _ns_session_mount),
+    # so we read from the host-side scratch dir directly. Falls back to
+    # the legacy $upper path for sessions that predate the bind-mount
+    # change so cross-version operation stays clean.
     if (( ${#found[@]} == 0 )); then
-      local pkgroot="$upper/var/tmp/portage/$cat_part"
+      local pkgroot="$(session_portage_tmpdir "$session")/$cat_part"
+      [[ -d "$pkgroot" ]] || pkgroot="$upper/var/tmp/portage/$cat_part"
       if [[ -d "$pkgroot" ]]; then
         local pf_dir
         while IFS= read -r -d '' pf_dir; do
@@ -1862,19 +1937,30 @@ _compare_salvage_phase_stats() {
 
 _compare_salvage_buildlogs() {
   local session="$1" dest="$2"
-  local upper pkgroot
-  # IMPORTANT: walk the overlay's `upper` layer, not `merged`. The merged
-  # view is only populated INSIDE the per-session mount namespace (where
-  # the overlay+binds live); from the host's main namespace `merged/` is
-  # empty after the session command returns -- so a `find` against it
-  # returns nothing and salvage silently produces zero files. The upper
-  # layer always contains every file written during the session and
-  # persists outside the namespace until cmd_destroy removes session_dir.
-  # Verified empirically: dev-haskell/* (and all other build-phase
-  # failures whose chroots include /var/tmp/portage/<cat>/<pf>/temp/
-  # build.log) silently failed to salvage before this fix.
-  upper="$(session_upper "$session")"
-  pkgroot="$upper/var/tmp/portage"
+  local pkgroot
+  # /var/tmp/portage inside the chroot is a per-session bind-mount of
+  # session_portage_tmpdir() (set up in _ns_session_mount as an overlay
+  # bypass); the host-side directory persists after the namespace exits,
+  # so we read from it directly. For sessions that predate this layout
+  # we fall back to the original $upper/var/tmp/portage location so
+  # cross-version operation stays clean.
+  #
+  # IMPORTANT historical context: when this code walked the overlay's
+  # `upper` layer it had to AVOID `merged`, because from the host's
+  # main namespace `merged/` is empty after the session command returns
+  # (the overlay+binds only exist inside the per-session mount
+  # namespace). The upper layer always contained every file written
+  # during the session and persisted outside the namespace until
+  # cmd_destroy removed session_dir. Verified empirically: dev-haskell/*
+  # (and all other build-phase failures whose chroots include
+  # /var/tmp/portage/<cat>/<pf>/temp/build.log) silently failed to
+  # salvage before that fix. The portage_tmpdir layout preserves the
+  # same persistence guarantee while bypassing the overlay-inode-cache
+  # bug; see commit log for details.
+  pkgroot="$(session_portage_tmpdir "$session")"
+  if [[ ! -d "$pkgroot" ]]; then
+    pkgroot="$(session_upper "$session")/var/tmp/portage"
+  fi
   [[ -d "$pkgroot" ]] || return 0
   local n=0 log rel cat pf
   while IFS= read -r -d '' log; do
@@ -2254,6 +2340,36 @@ _compare_summarize() {
   fi
   if [[ -f "$em_build_log" ]] && grep -aqE 'Please download files manually|Fetch failed for ' "$em_build_log" 2>/dev/null; then
     em_status="RESTRICT(fetch)"
+  fi
+
+  # Reclassify gtar "Directory renamed before its status could be extracted"
+  # as INFRA(overlay-inode-flicker). This is a documented OverlayFS bug:
+  # under inode-cache reclaim pressure (mesa-26.0.5.tar.xz unpacks ~30k
+  # files, librsvg / glib are similar), the kernel evicts overlay inodes
+  # mid-extraction and re-allocates fresh ones; gtar's verify-after-create
+  # lstat() returns a different inode than the one it recorded and bails.
+  # See https://github.com/spdk/spdk/issues/3521 plus the docker/RHEL
+  # threads with the same symptom.
+  #
+  # The bug strikes pn ~26x more than emerge in our matrix because pn's
+  # layer-batched executor keeps many cpvs' workdirs populated under
+  # /var/tmp/portage simultaneously, maximising overlay inode-cache
+  # pressure. Tagging it explicitly avoids charging pn for an
+  # infrastructure issue. The fix path (separate non-overlay tmpfs at
+  # /var/tmp/portage) lands in _ns_session_mount; this reclassifier is
+  # the cheap accounting fix that's correct even after that lands (any
+  # residual occurrence is still genuinely an infra issue).
+  local _gtar_re='Directory renamed before its status could be extracted'
+  if [[ -f "$pn_build_log" ]] && grep -aqE "$_gtar_re" "$pn_build_log" 2>/dev/null; then
+    pn_status="INFRA(overlay-inode-flicker)"
+  elif [[ -d "$logdir/build-logs/portage-ng" ]] && \
+       find "$logdir/build-logs/portage-ng" -name '*.build.log.gz' -print0 2>/dev/null \
+         | xargs -0 -r zgrep -lE "$_gtar_re" 2>/dev/null \
+         | grep -q .; then
+    pn_status="INFRA(overlay-inode-flicker)"
+  fi
+  if [[ -f "$em_build_log" ]] && grep -aqE "$_gtar_re" "$em_build_log" 2>/dev/null; then
+    em_status="INFRA(overlay-inode-flicker)"
   fi
 
   # portage-ng renders with ANSI color codes, so we strip them before matching.
@@ -2650,9 +2766,12 @@ cmd_reset() {
   local name="$1"
   sweep_session_orphans "$name"
   unmount_session "$name"
-  log_info "wiping upper and work dirs for session '$name'"
-  rm -rf --one-file-system "$(session_upper "$name")" "$(session_work "$name")"
+  log_info "wiping upper, work and portage_tmpdir for session '$name'"
+  rm -rf --one-file-system "$(session_upper "$name")" "$(session_work "$name")" \
+                           "$(session_portage_tmpdir "$name")"
   install -d "$(session_upper "$name")" "$(session_work "$name")"
+  install -d -m 2775 "$(session_portage_tmpdir "$name")"
+  chown 250:250 "$(session_portage_tmpdir "$name")" 2>/dev/null || true
   log_ok "session '$name' reset to baseline"
 }
 
@@ -2716,18 +2835,24 @@ cmd_tmpfs_down() {
 
 cmd_list() {
   require_dirs
-  printf '%-20s  %-8s  %-12s  %s\n' NAME MOUNTED UPPER_SIZE CREATED
+  # SCRATCH = /var/tmp/portage scratch dir (off-overlay; see
+  # session_portage_tmpdir); accounts for ebuild work/temp/image trees
+  # that used to be in UPPER. Operators reading old vs new lists will see
+  # UPPER shrink and SCRATCH appear; the sum is roughly comparable to the
+  # prior UPPER number.
+  printf '%-30s  %-8s  %-10s  %-10s  %s\n' NAME MOUNTED UPPER SCRATCH CREATED
   if [[ ! -d "$SESSIONS_DIR" ]]; then return; fi
-  local s name mounted size info created
+  local s name mounted upper_size scratch_size info created
   for s in "$SESSIONS_DIR"/*/; do
     [[ -d "$s" ]] || continue
     name="$(basename "$s")"
     if session_is_mounted "$name"; then mounted=yes; else mounted=no; fi
-    size="$(du -sh "$(session_upper "$name")" 2>/dev/null | awk '{print $1}')"
+    upper_size="$(du -sh "$(session_upper "$name")" 2>/dev/null | awk '{print $1}')"
+    scratch_size="$(du -sh "$(session_portage_tmpdir "$name")" 2>/dev/null | awk '{print $1}')"
     info="$s/info"
     created="-"
     [[ -f "$info" ]] && created="$(awk -F= '$1=="created"{print $2}' "$info")"
-    printf '%-20s  %-8s  %-12s  %s\n' "$name" "$mounted" "${size:--}" "$created"
+    printf '%-30s  %-8s  %-10s  %-10s  %s\n' "$name" "$mounted" "${upper_size:--}" "${scratch_size:--}" "$created"
   done
 }
 
