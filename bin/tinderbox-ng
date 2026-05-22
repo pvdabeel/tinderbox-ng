@@ -762,6 +762,28 @@ cmd_doctor() {
     fi
   fi
 
+  # baseline.make.conf must pin LDFLAGS explicitly. Without it the profile
+  # default injects -Wl,-z,pack-relative-relocs, which breaks autoconf's
+  # conftest on a large slice of ebuilds (false "C compiler cannot create
+  # executables" failures in compare rows).
+  if [[ -f "$BASELINE_DIR/etc/portage/make.conf" ]]; then
+    local _mc="$BASELINE_DIR/etc/portage/make.conf"
+    local _ldflags_line
+    _ldflags_line="$(grep -E '^LDFLAGS=' "$_mc" 2>/dev/null | head -n1 || true)"
+    if [[ -z "$_ldflags_line" ]]; then
+      log_warn "baseline make.conf has no LDFLAGS= pin; profile may add -Wl,-z,pack-relative-relocs"
+      log_warn "  causing spurious autoconf failures in compare/matrix runs. Fix with:"
+      log_warn "    tinderbox-ng refresh-baseline-config"
+      warn=$((warn+1))
+    elif [[ "$_ldflags_line" == *pack-relative-relocs* ]]; then
+      log_warn "baseline make.conf LDFLAGS includes pack-relative-relocs (discouraged on this rig)"
+      log_warn "  redeploy templates with: tinderbox-ng refresh-baseline-config"
+      warn=$((warn+1))
+    else
+      log_ok "baseline LDFLAGS pinned (no pack-relative-relocs)"
+    fi
+  fi
+
   if (( fail > 0 )); then
     die "preflight: $fail error(s), $warn warning(s); fix errors before bootstrap"
   fi
@@ -1022,14 +1044,18 @@ bootstrap_pin_tree() {
   _set_tree_pin "$PORTAGE_TREE_PIN"
 }
 
-bootstrap_post_stage3() {
-  log_info "post-stage3 setup (profile, locale, env, mtab, /etc/portage)"
-
+_bootstrap_apply_portage_templates() {
   install -d "$BASELINE_DIR/etc/portage/repos.conf"
   install -d "$BASELINE_DIR/etc/portage/package.use"
   cp_template baseline.repos.conf "$BASELINE_DIR/etc/portage/repos.conf/gentoo.conf"
   cp_template baseline.make.conf  "$BASELINE_DIR/etc/portage/make.conf"
   cp_template baseline.package.use "$BASELINE_DIR/etc/portage/package.use/00-tinderbox-ng-defaults"
+}
+
+bootstrap_post_stage3() {
+  log_info "post-stage3 setup (profile, locale, env, mtab, /etc/portage)"
+
+  _bootstrap_apply_portage_templates
 
   install -d "$BASELINE_DIR/var/cache/distfiles" \
              "$BASELINE_DIR/var/cache/binpkgs" \
@@ -1632,6 +1658,40 @@ cmd_baseline_thaw() {
     die "baseline-thaw: residual damage ($files_after files, $dirs_after dirs); investigate"
   fi
   log_ok "baseline thawed; setuid bits and xattrs untouched"
+}
+
+# =============================================================================
+# Subcommand: refresh-baseline-config
+# =============================================================================
+#
+# Re-apply the shipped /etc/portage templates (make.conf, repos.conf,
+# package.use defaults) from share/tinderbox-ng/ into the existing baseline.
+# Idempotent and cheap (~instant). Does not touch emerged packages, kb.qlf,
+# or portage-ng — only the three template files bootstrap copies at
+# bootstrap_post_stage3 time.
+#
+# Use when share/tinderbox-ng/baseline.make.conf gains a new pin (e.g.
+# LDFLAGS without pack-relative-relocs) and you want existing baselines to
+# pick it up without a full TINDERBOX_REBOOTSTRAP=1 rebuild.
+
+cmd_refresh_baseline_config() {
+  require_root
+  require_dirs
+
+  [[ -d "$BASELINE_DIR" ]] || die "no baseline at $BASELINE_DIR"
+
+  local mc="$BASELINE_DIR/etc/portage/make.conf"
+  if [[ -f "$mc" ]] && [[ ! -w "$mc" ]]; then
+    die "$mc is not owner-writable; run: tinderbox-ng baseline-thaw"
+  fi
+
+  log_info "refresh-baseline-config: re-applying portage templates from $SHARE_DIR"
+  _bootstrap_apply_portage_templates
+  log_ok "baseline portage templates refreshed:"
+  log_info "  $BASELINE_DIR/etc/portage/make.conf"
+  log_info "  $BASELINE_DIR/etc/portage/repos.conf/gentoo.conf"
+  log_info "  $BASELINE_DIR/etc/portage/package.use/00-tinderbox-ng-defaults"
+  log_info "new compare sessions inherit the update via the baseline lower layer"
 }
 
 # =============================================================================
@@ -4223,6 +4283,10 @@ Subcommands:
                            on every file and dir in the baseline. Idempotent and
                            cheap (~1s for a 70k-file stage3). `tinderbox-ng
                            doctor` warns when this is needed.
+  refresh-baseline-config  Re-apply share/tinderbox-ng portage templates
+                           (make.conf, repos.conf, package.use) into an existing
+                           baseline. Picks up template fixes (e.g. LDFLAGS pin)
+                           without TINDERBOX_REBOOTSTRAP=1. Idempotent.
 
   new <name>               Create an empty session.
   enter <name>             Mount overlay + binds and chroot in (interactive).
@@ -4375,6 +4439,8 @@ main() {
     install_kernel_sources) cmd_install_kernel_sources "$@" ;;
     baseline-thaw)         cmd_baseline_thaw "$@" ;;
     baseline_thaw)         cmd_baseline_thaw "$@" ;;
+    refresh-baseline-config) cmd_refresh_baseline_config "$@" ;;
+    refresh_baseline_config) cmd_refresh_baseline_config "$@" ;;
     new)          cmd_new          "$@" ;;
     enter)        cmd_enter        "$@" ;;
     exec)         cmd_exec         "$@" ;;

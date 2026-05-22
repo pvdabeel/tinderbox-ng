@@ -32,15 +32,17 @@
 
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SHARE_DIR="$REPO_ROOT/share/tinderbox-ng"
 
 usage() {
   cat >&2 <<EOF
 usage: deploy-baseline.sh <template-name> <user@host:remote-path>
 
-Available templates in $LIB_DIR:
+Available templates in $SHARE_DIR:
 EOF
-  ls -1 "$LIB_DIR" | sed 's/^/  /' >&2
+  ls -1 "$SHARE_DIR" | sed 's/^/  /' >&2
   cat >&2 <<EOF
 
 Templates known to need substitution:
@@ -58,7 +60,7 @@ EOF
 template="$1"
 remote="$2"
 
-src="$LIB_DIR/$template"
+src="$SHARE_DIR/$template"
 [[ -f "$src" ]] || { echo "deploy-baseline.sh: missing template $src" >&2; exit 1; }
 [[ "$remote" == *:* ]] || { echo "deploy-baseline.sh: remote must be user@host:path (got '$remote')" >&2; exit 1; }
 

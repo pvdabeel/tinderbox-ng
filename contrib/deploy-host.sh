@@ -41,6 +41,11 @@ Options:
                          baseline-internal /opt/portage-ng (re-uses the in-baseline
                          shipped source). Use this for fast resolver-only updates
                          that do NOT need a kb.qlf rebuild.
+  --refresh-baseline-config
+                         After install, run `tinderbox-ng refresh-baseline-config`
+                         on the remote to re-apply share/tinderbox-ng portage
+                         templates (make.conf LDFLAGS pin, repos.conf, package.use)
+                         into the existing baseline without a full rebootstrap.
   --selftest             Run `tinderbox-ng selftest` on the remote after
                          install (independent of --bootstrap).
   --remote-prefix DIR    Where to install bin/, libexec/, share/ on the remote
@@ -69,6 +74,7 @@ USAGE
 # Defaults
 DO_BOOTSTRAP=0
 DO_REFRESH_PNG=0
+DO_REFRESH_BASELINE_CONFIG=0
 DO_SELFTEST=0
 REMOTE_PREFIX=/usr/local/share/tinderbox-ng
 REMOTE_LINK=/usr/local/sbin/tinderbox-ng
@@ -78,6 +84,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --bootstrap)          DO_BOOTSTRAP=1; shift ;;
     --refresh-portage-ng) DO_REFRESH_PNG=1; shift ;;
+    --refresh-baseline-config) DO_REFRESH_BASELINE_CONFIG=1; shift ;;
     --selftest)           DO_SELFTEST=1; shift ;;
     --remote-prefix)      REMOTE_PREFIX="$2"; shift 2 ;;
     --link)               REMOTE_LINK="$2"; shift 2 ;;
@@ -202,6 +209,12 @@ if (( DO_REFRESH_PNG )); then
   log "  set PORTAGE_NG_LOCAL or PORTAGE_NG_URL in your env to point at it"
   remote_root "$ENV_PREFIX $(printf '%q' "$REMOTE_LINK") refresh-portage-ng" || \
     echo "[deploy-host] refresh-portage-ng failed (baseline may not exist yet)" >&2
+fi
+
+if (( DO_REFRESH_BASELINE_CONFIG )); then
+  log "step 4/4: $REMOTE_LINK refresh-baseline-config"
+  remote_root "$ENV_PREFIX $(printf '%q' "$REMOTE_LINK") refresh-baseline-config" || \
+    echo "[deploy-host] refresh-baseline-config failed (baseline may not exist yet)" >&2
 fi
 
 if (( DO_BOOTSTRAP )); then

@@ -142,6 +142,36 @@ Restores owner\-write on every file and directory in the baseline. Idempotent
 and cheap (~1\~s for a 70k\-file stage3).
 .B doctor
 warns when this is needed.
+.TP
+.B refresh\-baseline\-config
+Re\-apply the shipped portage templates from
+.I share/tinderbox-ng/
+into an existing baseline:
+.IR baseline.make.conf ,
+.IR baseline.repos.conf ,
+and
+.IR baseline.package.use
+(via
+.IR cp_template ,
+including
+.B @NPROC@
+substitution).
+Idempotent and cheap; does not touch emerged packages,
+.IR kb.qlf ,
+or portage\-ng.
+Use after template updates (notably the
+.B LDFLAGS
+pin that excludes
+.BR \-Wl,\-z,pack\-relative\-relocs )
+without a full
+.BR TINDERBOX_REBOOTSTRAP=1
+rebuild.
+.B doctor
+warns when
+.I make.conf
+is missing the
+.B LDFLAGS
+pin.
 .
 .SS Session lifecycle
 .TP
