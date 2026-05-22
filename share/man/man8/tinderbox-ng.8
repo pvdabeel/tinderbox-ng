@@ -45,10 +45,15 @@ metrics (Jaccard / Kendall\-tau / Spearman / dependency\-aware concordance) and
 forecasting tables (median / p75 / max of phase byte and wall\-clock counts).
 .PP
 .B tinderbox\-ng
-runs every chroot operation inside an unshared mount namespace
-.RB ( "unshare \-\-mount \-\-propagation=private" ),
+runs every chroot operation inside an unshared mount + IPC namespace
+.RB ( "unshare \-\-mount \-\-ipc \-\-propagation=private" ),
 so all bind\-mounts disappear automatically when the helper exits, even on
 .BR SIGKILL .
+Session
+.I /dev/log
+is symlinked to
+.I /dev/null
+so shadow account tools cannot spam the host syslog/journal.
 .
 .SH SUBCOMMANDS
 The first non\-flag argument selects the subcommand. The complete list,
@@ -898,10 +903,15 @@ sudo tinderbox\-ng continue \-\-jobs 16 \-\-background
 .B tinderbox\-ng
 must run as root (it manages bind\-mounts, mount namespaces and chroot jails).
 The script never modifies the host root: every chroot operation runs inside an
-unshared mount namespace
-.RB ( "unshare \-\-mount \-\-propagation=private" ),
+unshared mount + IPC namespace
+.RB ( "unshare \-\-mount \-\-ipc \-\-propagation=private" ),
 and all bind\-mounts disappear when the helper exits, even on
 .BR SIGKILL .
+Session
+.I /dev/log
+is a blackhole so
+.BR groupadd (8)/useradd (8)
+syslog noise stays out of the host journal.
 .PP
 The Portage tree is bind\-mounted read\-only into every session. The host's
 .I /var/db/pkg

@@ -177,11 +177,11 @@ require_kernel_overlay() {
 require_unshare() {
   command -v unshare >/dev/null 2>&1 \
     || die "unshare(1) not found; install sys-apps/util-linux"
-  # Sanity-check the kernel supports private mount namespaces - this should
-  # always succeed on a modern Linux but is worth confirming so we bail out
-  # before mounting anything.
-  if ! unshare --mount --propagation=private true 2>/dev/null; then
-    die "kernel refused 'unshare --mount --propagation=private'; check CONFIG_NAMESPACES"
+  # Sanity-check the kernel supports private mount + IPC namespaces - this
+  # should always succeed on a modern Linux but is worth confirming so we
+  # bail out before mounting anything.
+  if ! unshare --mount --ipc --propagation=private true 2>/dev/null; then
+    die "kernel refused 'unshare --mount --ipc --propagation=private'; check CONFIG_NAMESPACES"
   fi
 }
 
@@ -324,12 +324,13 @@ acquire_lock() {
 # Mount stack (per-session) - mount-namespace isolated
 # =============================================================================
 #
-# All chrooting happens inside `unshare --mount --propagation=private`. Mounts
-# made in that namespace are 100% invisible to the host; on namespace exit the
-# kernel discards them automatically. We never call umount in the host
-# namespace, never call `umount -l`, and never `--rbind` /dev (we mount a
-# fresh devtmpfs per session). This is the bulletproof safety design after
-# the May 2026 host-/dev incident.
+# All chrooting happens inside `unshare --mount --ipc --propagation=private`.
+# Mounts made in that namespace are 100% invisible to the host; on namespace
+# exit the kernel discards them automatically. --ipc keeps abstract AF_UNIX
+# sockets (notably syslog's @/dev/log) out of the host journal. We never call
+# umount in the host namespace, never call `umount -l`, and never `--rbind`
+# /dev (we mount a fresh devtmpfs per session). This is the bulletproof safety
+# design after the May 2026 host-/dev incident.
 
 _mount_quiet() {
   if ! mount "$@" 2>/tmp/tinderbox-ng-mount.err; then
@@ -337,6 +338,20 @@ _mount_quiet() {
     cat /tmp/tinderbox-ng-mount.err >&2 || true
     return 1
   fi
+}
+
+# Session/baseline chroot entry: private mount + IPC namespaces.
+_unshare_ns() {
+  unshare --mount --ipc --propagation=private -- "$@"
+}
+
+# Drop syslog(3) from shadow account tools (groupadd/useradd during acct-*
+# merges) inside the session. With --ipc abstract sockets already cannot reach
+# host journald; this catches the filesystem /dev/log path too.
+_ns_blackhole_dev_log() {
+  local devdir="$1/dev"
+  [[ -d "$devdir" ]] || return 0
+  ln -sf /dev/null "$devdir/log"
 }
 
 # Resolve every mDNS hostname listed in $TINDERBOX_MDNS_HOSTS via the
@@ -389,6 +404,7 @@ _ns_session_mount() {
   install -d "$merged/dev/pts" "$merged/dev/shm"
   _mount_quiet -t devpts  -o newinstance,ptmxmode=0620,gid=5 devpts "$merged/dev/pts"
   _mount_quiet -t tmpfs   -o mode=1777 tmpfs "$merged/dev/shm"
+  _ns_blackhole_dev_log "$merged"
 
   _mount_quiet -t proc  proc  "$merged/proc"
   _mount_quiet -t sysfs sysfs "$merged/sys"
@@ -471,7 +487,7 @@ session_is_mounted() { return 1; }
 # Orphan reaper
 # -----------------------------------------------------------------------------
 #
-# Even with `unshare --mount --propagation=private`, a session's processes can
+# Even with `unshare --mount --ipc --propagation=private`, a session's processes can
 # survive past unshare's exit if they detach (PPID gets reparented to init).
 # The most common offender is portage's die_hooks chain:
 #
@@ -598,10 +614,10 @@ cmd_doctor() {
   fi
 
   # Mount-namespace support
-  if unshare --mount --propagation=private true >/dev/null 2>&1; then
-    log_ok "kernel supports unshare --mount --propagation=private"
+  if unshare --mount --ipc --propagation=private true >/dev/null 2>&1; then
+    log_ok "kernel supports unshare --mount --ipc --propagation=private"
   else
-    log_error "kernel refused 'unshare --mount --propagation=private'"
+    log_error "kernel refused 'unshare --mount --ipc --propagation=private'"
     log_error "  enable CONFIG_NAMESPACES, CONFIG_USER_NS, CONFIG_PID_NS, CONFIG_MOUNT_NS"
     fail=$((fail+1))
   fi
@@ -1738,7 +1754,7 @@ cmd_enter() {
 
   acquire_lock "$name"
   log_info "entering session '$name' in private mount namespace"
-  exec unshare --mount --propagation=private -- \
+  exec unshare --mount --ipc --propagation=private -- \
     "$0" __ns-helper session "$name" /bin/bash -l
 }
 
@@ -1770,13 +1786,11 @@ cmd_exec() {
 
   local rc=0
   if command -v ts >/dev/null 2>&1; then
-    unshare --mount --propagation=private -- \
-      "$0" __ns-helper session "$name" /bin/bash -l -c "$*" 2>&1 \
+    _unshare_ns "$0" __ns-helper session "$name" /bin/bash -l -c "$*" 2>&1 \
       | ts '%H:%M:%S' | tee "$logfile" \
       || rc=${PIPESTATUS[0]}
   else
-    unshare --mount --propagation=private -- \
-      "$0" __ns-helper session "$name" /bin/bash -l -c "$*" 2>&1 \
+    _unshare_ns "$0" __ns-helper session "$name" /bin/bash -l -c "$*" 2>&1 \
       | tee "$logfile" \
       || rc=${PIPESTATUS[0]}
   fi
@@ -2120,8 +2134,7 @@ _compare_run_pass() {
   # date +%s.%N gives nanosecond-precision Unix epoch with a literal
   # '.' separator (locale-independent), unlike bash's $EPOCHREALTIME.
   t0="$(date +%s.%N)"
-  unshare --mount --propagation=private -- \
-    "$0" __ns-helper session "$sess" /bin/bash -l -c "$cmd" \
+  _unshare_ns "$0" __ns-helper session "$sess" /bin/bash -l -c "$cmd" \
     >"$log" 2>&1
   local rc=$?
   t1="$(date +%s.%N)"
@@ -3325,7 +3338,7 @@ _progress_render_frame() {
   # ---- Active sessions ----
   #
   # State detection: each session mounts its overlay inside a *private*
-  # mount namespace (`unshare --mount --propagation=private` in
+  # mount + IPC namespace (`unshare --mount --ipc --propagation=private` in
   # mount_overlay_for), so from the host's mount namespace `mountpoint`
   # always reports "not mounted" — the old check rendered every session
   # as "idle". Instead, walk /proc once and find every process whose
@@ -4139,8 +4152,7 @@ in_baseline_chroot() {
     shift
   fi
   local ns_mode="baseline-${tree_mode}"
-  unshare --mount --propagation=private -- \
-    "$0" __ns-helper "$ns_mode" "$@"
+  _unshare_ns "$0" __ns-helper "$ns_mode" "$@"
 }
 
 # Mount the bare minimum onto the baseline. Must run inside an unshared
@@ -4159,6 +4171,8 @@ _ns_baseline_mount() {
   install -d "$M/dev/pts" "$M/dev/shm"
   _mount_quiet -t devpts -o newinstance,ptmxmode=0620,gid=5 devpts "$M/dev/pts"
   _mount_quiet -t tmpfs  -o mode=1777 tmpfs "$M/dev/shm"
+
+  _ns_blackhole_dev_log "$M"
 
   _mount_quiet -t proc  proc  "$M/proc"
   _mount_quiet -t sysfs sysfs "$M/sys"
@@ -4475,7 +4489,7 @@ main() {
     tmpfs_down)   cmd_tmpfs_down   "$@" ;;
     -h|--help|help) usage; exit 0 ;;
 
-    # Internal: re-entered inside `unshare --mount --propagation=private`
+    # Internal: re-entered inside `unshare --mount --ipc --propagation=private`
     # by cmd_enter / cmd_exec / in_baseline_chroot. Not for user use.
     __ns-helper) _ns_helper_main   "$@" ;;
 

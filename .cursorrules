@@ -118,14 +118,15 @@ internal layer for chroot/overlay/mount-namespace plumbing.
    `consolidate-phase-stats`), `extract-timing` (alias `timing` /
    `extract_timing`).
 8. Internal: `__ns-helper` is the re-entry point inside
-   `unshare --mount --propagation=private`. Never invoked by users.
+   `unshare --mount --ipc --propagation=private`. Never invoked by users.
 
 ### Key invariants
 
 - Every chroot operation runs inside an unshared mount namespace
-  (`unshare --mount --propagation=private`). The script re-execs
+  (`unshare --mount --ipc --propagation=private`). The script re-execs
   itself with `__ns-helper` so the mounts disappear automatically when
-  the helper exits, even on `kill -9`.
+  the helper exits, even on `kill -9`. Session `/dev/log` is symlinked
+  to `/dev/null` so shadow account-tool syslog cannot reach the host journal.
 - The baseline (`/srv/tinderbox-ng/baseline/`) is the OverlayFS
   **lower layer**. After `bootstrap` it is bind-mounted ro into every
   session.
