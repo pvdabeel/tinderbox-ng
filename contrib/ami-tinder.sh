@@ -1,16 +1,14 @@
 #!/bin/bash
 # contrib/ami-tinder.sh — ephemeral tinderbox-ng matrix driver for AWS Gentoo AMIs.
 #
-# Bake only this script into the AMI (as /root/bin/tinder) plus a login-shell
-# alias in ~/.bash_profile:
-#   alias tinder='/root/bin/tinder'
-#
-# myaws invokes:  ssh root@host "bash -icl tinder"
+# Not baked into AMIs.  VMs define a login-shell `tinder` command (see
+# contrib/install-ami-tinder.sh) that curl's this file from GitHub and pipes
+# it to bash.  myaws invokes:  ssh root@host "bash -icl tinder"
 #
 # Everything else is cloned at run time from GitHub (pvdabeel/tinderbox-ng,
 # pvdabeel/portage-ng), installed under /usr/local/share/, and exercised under
-# a tmpfs-backed $TINDERBOX_ROOT (no extra EBS).  The instance is terminated
-# afterward by myaws — nothing on tmpfs survives.
+# a tmpfs-backed $TINDERBOX_ROOT (no extra EBS).  Ephemeral workers are
+# terminated afterward by myaws — nothing on tmpfs survives.
 #
 # Environment overrides (all optional):
 #   TINDERBOX_NG_REF / PORTAGE_NG_REF   git refs (default: main, then master)
