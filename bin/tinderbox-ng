@@ -887,9 +887,8 @@ cmd_bootstrap() {
   fi
 }
 
-# Import the Gentoo Release Engineering key used to sign stage3 .asc files.
-# AWS and other headless hosts often cannot reach hkps://keys.gentoo.org
-# ("Network is unreachable"); ship the key in share/ and fall back to HTTPS.
+# Import Gentoo release signing keys (master + rotating weekly keys in
+# gentoo-release.asc). AWS often cannot reach hkps://keys.gentoo.org.
 _bootstrap_import_releng_key() {
   local homedir="${1:-$STAGE3_CACHE/.gnupg}"
 
@@ -958,9 +957,14 @@ bootstrap_fetch_stage3() {
     curl -fL --remote-name-all -C - "$url_tar" "$url_dig" "$url_asc" || \
       curl -fL --remote-name-all "$url_tar" "$url_dig" "$url_asc"
 
-    log_info "verifying GPG signature on .DIGESTS"
+    log_info "verifying GPG signature on $tarball"
     _bootstrap_import_releng_key "$STAGE3_CACHE/.gnupg"
-    gpg --homedir "$STAGE3_CACHE/.gnupg" --verify "$tarball.asc" "$tarball.DIGESTS"
+    # .tar.xz.asc is a detached signature over the tarball (not .DIGESTS).
+    gpg --homedir "$STAGE3_CACHE/.gnupg" --verify "$tarball.asc" "$tarball"
+
+    log_info "verifying GPG signature on $tarball.DIGESTS"
+    # .DIGESTS is clearsigned inline; checksum lines are verified below.
+    gpg --homedir "$STAGE3_CACHE/.gnupg" --verify "$tarball.DIGESTS"
 
     # Modern GnuPG auto-spawns long-lived per-homedir daemons (keyboxd,
     # gpg-agent) on first use and keeps them resident for ~10min idle.
