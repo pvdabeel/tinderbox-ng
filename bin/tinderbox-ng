@@ -887,6 +887,57 @@ cmd_bootstrap() {
   fi
 }
 
+# Import the Gentoo Release Engineering key used to sign stage3 .asc files.
+# AWS and other headless hosts often cannot reach hkps://keys.gentoo.org
+# ("Network is unreachable"); ship the key in share/ and fall back to HTTPS.
+_bootstrap_import_releng_key() {
+  local homedir="${1:-$STAGE3_CACHE/.gnupg}"
+
+  mkdir -p "$homedir" && chmod 700 "$homedir"
+
+  if gpg --homedir "$homedir" --list-keys "$GENTOO_RELENG_KEY" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  log_info "importing Gentoo Release Engineering key ($GENTOO_RELENG_KEY)"
+
+  if [[ -f "$SHARE_DIR/gentoo-release.asc" ]]; then
+    if gpg --homedir "$homedir" --import "$SHARE_DIR/gentoo-release.asc" >/dev/null 2>&1 \
+        && gpg --homedir "$homedir" --list-keys "$GENTOO_RELENG_KEY" >/dev/null 2>&1; then
+      log_info "  from bundled $SHARE_DIR/gentoo-release.asc"
+      return 0
+    fi
+    log_warn "  bundled gentoo-release.asc did not provide $GENTOO_RELENG_KEY"
+  fi
+
+  local url="${TINDERBOX_STAGE3_RELENG_ASC_URL:-https://dev.gentoo.org/~mgorny/dist/openpgp-keys/gentoo-release.asc.20250806.gz}"
+  if curl -fsSL "$url" | gzip -dc 2>/dev/null \
+      | gpg --homedir "$homedir" --import - >/dev/null 2>&1 \
+      && gpg --homedir "$homedir" --list-keys "$GENTOO_RELENG_KEY" >/dev/null 2>&1; then
+    log_info "  from $url"
+    return 0
+  fi
+
+  if curl -fsSL 'https://qa-reports.gentoo.org/output/service-keys.gpg' \
+      | gpg --homedir "$homedir" --import - >/dev/null 2>&1 \
+      && gpg --homedir "$homedir" --list-keys "$GENTOO_RELENG_KEY" >/dev/null 2>&1; then
+    log_info "  from qa-reports service-keys.gpg"
+    return 0
+  fi
+
+  local ks
+  for ks in hkps://keyserver.ubuntu.com hkps://keys.openpgp.org hkps://keys.gentoo.org; do
+    if gpg --homedir "$homedir" --keyserver "$ks" --recv-keys "$GENTOO_RELENG_KEY" >/dev/null 2>&1 \
+        && gpg --homedir "$homedir" --list-keys "$GENTOO_RELENG_KEY" >/dev/null 2>&1; then
+      log_info "  from keyserver $ks"
+      return 0
+    fi
+    log_warn "  keyserver $ks failed for $GENTOO_RELENG_KEY"
+  done
+
+  die "could not import Gentoo Release Engineering key $GENTOO_RELENG_KEY"
+}
+
 bootstrap_fetch_stage3() {
   local pointer_url="$STAGE3_BASE_URL/latest-stage3-${STAGE3_VARIANT}.txt"
   log_info "resolving latest stage3 ($STAGE3_VARIANT) from $pointer_url"
@@ -908,12 +959,8 @@ bootstrap_fetch_stage3() {
       curl -fL --remote-name-all "$url_tar" "$url_dig" "$url_asc"
 
     log_info "verifying GPG signature on .DIGESTS"
-    if ! gpg --homedir "$STAGE3_CACHE/.gnupg" --list-keys "$GENTOO_RELENG_KEY" >/dev/null 2>&1; then
-      mkdir -p "$STAGE3_CACHE/.gnupg" && chmod 700 "$STAGE3_CACHE/.gnupg"
-      gpg --homedir "$STAGE3_CACHE/.gnupg" --keyserver hkps://keys.gentoo.org \
-          --recv-keys "$GENTOO_RELENG_KEY"
-    fi
-    gpg --homedir "$STAGE3_CACHE/.gnupg" --verify "$tarball.asc"
+    _bootstrap_import_releng_key "$STAGE3_CACHE/.gnupg"
+    gpg --homedir "$STAGE3_CACHE/.gnupg" --verify "$tarball.asc" "$tarball.DIGESTS"
 
     # Modern GnuPG auto-spawns long-lived per-homedir daemons (keyboxd,
     # gpg-agent) on first use and keeps them resident for ~10min idle.

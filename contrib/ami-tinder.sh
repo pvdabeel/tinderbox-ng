@@ -28,7 +28,7 @@ set -euo pipefail
 TINDERBOX_NG_URL="${TINDERBOX_NG_URL:-https://github.com/pvdabeel/tinderbox-ng.git}"
 PORTAGE_NG_URL="${PORTAGE_NG_URL:-https://github.com/pvdabeel/portage-ng.git}"
 TINDERBOX_NG_REF="${TINDERBOX_NG_REF:-main}"
-PORTAGE_NG_REF="${PORTAGE_NG_REF:-main}"
+PORTAGE_NG_REF="${PORTAGE_NG_REF:-master}"
 TINDERBOX_ROOT="${TINDERBOX_ROOT:-/srv/tinderbox-ng}"
 TINDERBOX_INSTALL="${TINDERBOX_INSTALL:-/usr/local/share/tinderbox-ng}"
 PORTAGE_NG_CLONE="${PORTAGE_NG_CLONE:-/usr/local/share/portage-ng}"
