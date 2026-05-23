@@ -55,30 +55,53 @@ _mem_gib() {
   echo $(( (kib + 1048575) / 1048576 ))
 }
 
-# Scale tmpfs / jobs / ccache / default manifest to available RAM.
+# Scale tmpfs / jobs / ccache / default manifest to available RAM and CPU.
+# Hyperthreading: nproc counts logical CPUs (HT siblings). compare-matrix
+# --jobs is outer package-level parallelism; NPROC is inner emerge/make
+# per session (MAKEOPTS -j / emerge --jobs). Keep their product near nproc
+# so a full matrix does not launch jobs×NPROC×2 oversubscribed compile
+# storms while still filling HT pairs during --build compiles.
 _auto_profile() {
   local gib="$1"
+  local nproc_logical nproc_physical mem_jobs inner
+
+  nproc_logical="$(nproc)"
+  nproc_physical=$(( nproc_logical / 2 ))
+  (( nproc_physical < 1 )) && nproc_physical=1
+  mem_jobs=$(( gib / 8 ))
+  (( mem_jobs < 1 )) && mem_jobs=1
+
   if (( gib >= 1000 )); then
     TINDER_TMPFS_SIZE="${TINDER_TMPFS_SIZE:-1200G}"
-    TINDER_JOBS="${TINDER_JOBS:-192}"
     TINDER_CCACHE="${TINDER_CCACHE:-80G}"
     TINDER_MANIFEST="${TINDER_MANIFEST:-manifest-1000.txt}"
-    NPROC="${NPROC:-32}"
   elif (( gib >= 120 )); then
     TINDER_TMPFS_SIZE="${TINDER_TMPFS_SIZE:-$(( gib * 75 / 100 ))G}"
-    TINDER_JOBS="${TINDER_JOBS:-$(( gib / 8 ))}"
     TINDER_CCACHE="${TINDER_CCACHE:-$(( gib / 4 ))G}"
     TINDER_MANIFEST="${TINDER_MANIFEST:-manifest-100.txt}"
-    NPROC="${NPROC:-32}"
   else
     TINDER_TMPFS_SIZE="${TINDER_TMPFS_SIZE:-$(( gib * 70 / 100 ))G}"
-    TINDER_JOBS="${TINDER_JOBS:-$(( gib / 8 ))}"
-    (( TINDER_JOBS < 1 )) && TINDER_JOBS=1
-    (( TINDER_JOBS > 16 )) && TINDER_JOBS=16
     TINDER_CCACHE="${TINDER_CCACHE:-2G}"
     TINDER_MANIFEST="${TINDER_MANIFEST:-manifest-100.txt}"
-    NPROC="${NPROC:-$(nproc)}"
   fi
+
+  # Outer compare slots: one per physical core by default, capped by RAM
+  # (~8 GiB per slot is a conservative floor for two overlay sessions).
+  if [[ -z "${TINDER_JOBS:-}" ]]; then
+    TINDER_JOBS=$nproc_physical
+    (( TINDER_JOBS > mem_jobs )) && TINDER_JOBS=$mem_jobs
+    (( gib < 120 && TINDER_JOBS > 16 )) && TINDER_JOBS=16
+  fi
+
+  # Inner per-session compile parallelism: spread logical CPUs across active
+  # compare slots (~2 threads per slot at full matrix occupancy).
+  if [[ -z "${NPROC:-}" ]]; then
+    inner=$(( (nproc_logical + TINDER_JOBS - 1) / TINDER_JOBS ))
+    (( inner < 4 )) && inner=4
+    (( inner > 32 )) && inner=32
+    NPROC=$inner
+  fi
+
   TINDER_MATRIX_MODE="${TINDER_MATRIX_MODE:---pretend}"
   case "$TINDER_MATRIX_MODE" in
     --pretend|--build) ;;
@@ -199,7 +222,7 @@ main() {
   local gib
   gib="$(_mem_gib)"
   _auto_profile "$gib"
-  _log "host: $(hostname)  mem=${gib}GiB  nproc=$(nproc)"
+  _log "host: $(hostname)  mem=${gib}GiB  nproc=$(nproc) (logical; phys~$(( $(nproc) / 2 )))"
   _log "profile: tmpfs=$TINDER_TMPFS_SIZE jobs=$TINDER_JOBS ccache=$TINDER_CCACHE manifest=$TINDER_MANIFEST mode=$TINDER_MATRIX_MODE NPROC=$NPROC"
 
   export TINDERBOX_ROOT

@@ -41,6 +41,14 @@
 
 set -euo pipefail
 
+# compare-matrix status-line column widths (manifest-all longest atom: 68;
+# longest compare status: INFRA(overlay-inode-flicker), 28 chars).
+_CM_PKG_W=70
+_CM_STAT_W=30
+_CM_VDB_W=4
+_CM_DELTA_W=6
+_CM_SECS_W=6
+
 MODE="--pretend"
 LABEL_PREFIX=""
 KEEP=0
@@ -219,6 +227,8 @@ _run_one() {
       vdb_delta="+$((pn_vdb - em_vdb))"
     fi
   fi
+  local delta_str="($vdb_delta)"
+  local idx_w=${#total}
 
   # Mutex-protected append + status line so multiple workers don't
   # interleave their output and we never lose a TSV row.
@@ -228,8 +238,16 @@ _run_one() {
       "$pkg" "$MODE" "$pn_exit" "$em_exit" "$pn_actions" "$em_actions" \
       "$pn_completed" "$em_completed" "$pn_vdb" "$em_vdb" "$vdb_delta" "$elapsed" \
       >> "$TSV"
-    printf '[%d/%d] %-40s rc=%d  pn=%-9s em=%-9s vdb pn=%s em=%s (%s)  %ds\n' \
-      "$idx" "$total" "$pkg" "$rc" "$pn_exit" "$em_exit" "$pn_vdb" "$em_vdb" "$vdb_delta" "$elapsed"
+    printf '[%*d/%d] %-*s  rc=%2d  pn=%-*s  em=%-*s  vdb pn=%*s em=%*s  %-*s  %*ds\n' \
+      "$idx_w" "$idx" "$total" \
+      "$_CM_PKG_W" "$pkg" \
+      "$rc" \
+      "$_CM_STAT_W" "$pn_exit" \
+      "$_CM_STAT_W" "$em_exit" \
+      "$_CM_VDB_W" "$pn_vdb" \
+      "$_CM_VDB_W" "$em_vdb" \
+      "$_CM_DELTA_W" "$delta_str" \
+      "$_CM_SECS_W" "$elapsed"
   ) 9>"$TSV_LOCK"
 
   return "$mismatch"

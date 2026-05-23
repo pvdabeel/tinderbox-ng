@@ -1117,6 +1117,35 @@ _bootstrap_apply_portage_templates() {
   cp_template baseline.repos.conf "$BASELINE_DIR/etc/portage/repos.conf/gentoo.conf"
   cp_template baseline.make.conf  "$BASELINE_DIR/etc/portage/make.conf"
   cp_template baseline.package.use "$BASELINE_DIR/etc/portage/package.use/00-tinderbox-ng-defaults"
+  _baseline_sync_ccache_feature
+}
+
+# Toggle FEATURES=ccache in the baseline make.conf to match whether
+# dev-util/ccache is actually installed. Portage warns on every compile
+# when ccache is requested but /usr/lib*/ccache/bin is missing; keeping
+# the bit out of the shipped template avoids that during bootstrap steps
+# that run before bootstrap_install_ccache.
+_baseline_ccache_installed() {
+  local d
+  for d in "$BASELINE_DIR"/usr/lib/ccache/bin \
+           "$BASELINE_DIR"/usr/lib64/ccache/bin \
+           "$BASELINE_DIR"/usr/lib*/ccache/bin; do
+    [[ -d "$d" ]] && return 0
+  done
+  return 1
+}
+
+_baseline_sync_ccache_feature() {
+  local makeconf="$BASELINE_DIR/etc/portage/make.conf"
+  [[ -f "$makeconf" ]] || return 0
+
+  if _baseline_ccache_installed; then
+    grep -qE '^FEATURES=.*\bccache\b' "$makeconf" && return 0
+    sed -i 's/\(^FEATURES="[^"]*buildpkg\)/\1 ccache/' "$makeconf"
+  else
+    grep -qE '^FEATURES=.*\bccache\b' "$makeconf" || return 0
+    sed -i '/^FEATURES=/s/ ccache//g' "$makeconf"
+  fi
 }
 
 bootstrap_post_stage3() {
@@ -1146,7 +1175,40 @@ binutils-config -l
 emerge --info | head -n 5
 EOF
 
+  bootstrap_claim_app_alternatives
+
   log_ok "post-stage3 setup done"
+}
+
+# Stage3 tarballs ship common tool paths (/usr/bin/bc, /bin/cpio, …) without
+# an owning package. Gentoo's app-alternatives/* ebuilds claim those orphans
+# during @system migration; until they do, every transitive pull prints a
+# multi-paragraph file-collision elog even though protect-owned allows the
+# merge. Install the full alternatives set once, right after profile setup,
+# with collision protection disabled for this step only.
+bootstrap_claim_app_alternatives() {
+  log_info "claim stage3 orphan tool paths (app-alternatives)"
+  in_baseline_chroot bash -e <<'EOF'
+. /etc/profile
+local -a alts=(
+  app-alternatives/awk
+  app-alternatives/bc
+  app-alternatives/bzip2
+  app-alternatives/cpio
+  app-alternatives/gpg
+  app-alternatives/gzip
+  app-alternatives/lex
+  app-alternatives/lzip
+  app-alternatives/ninja
+  app-alternatives/sh
+  app-alternatives/tar
+  app-alternatives/yacc
+)
+FEATURES="-protect-owned -collision-protect ${FEATURES}" \
+  emerge --quiet-build=y --jobs="$(nproc)" --load-average="$(nproc)" \
+         --keep-going=y --oneshot "${alts[@]}"
+EOF
+  log_ok "app-alternatives installed"
 }
 
 bootstrap_install_swipl() {
@@ -1160,11 +1222,10 @@ EOF
 }
 
 # Install dev-util/ccache into the baseline and configure a host-shared
-# cache. baseline.make.conf already enables FEATURES="ccache" and points
-# CCACHE_DIR at /var/cache/ccache (which _ns_session_mount bind-mounts
-# from $CCACHE_DIR on the host, so every session shares the same cache).
-# Without this step the FEATURES bit is a no-op because the ccache
-# binary is missing from stage3 and from the shim path Portage builds.
+# cache. CCACHE_DIR in baseline.make.conf points at /var/cache/ccache
+# (_ns_session_mount bind-mounts from $CCACHE_DIR on the host). After
+# emerge, _baseline_sync_ccache_feature adds FEATURES=ccache so Portage
+# only requests the masquerade shims once they exist.
 #
 # /etc/ccache.conf:
 #   - max_size: caps the on-disk cache at $TINDERBOX_CCACHE_MAX_SIZE.
@@ -1214,6 +1275,7 @@ CFG
 ccache --version | head -n1
 ccache --show-config 2>/dev/null | grep -E '^(max_size|cache_dir|compression)' || true
 EOF
+  _baseline_sync_ccache_feature
   log_ok "ccache installed; max_size=$TINDERBOX_CCACHE_MAX_SIZE; shared dir: $CCACHE_DIR"
 }
 
@@ -4335,8 +4397,10 @@ _ns_helper_main() {
 cp_template() {
   local name="$1" dest="$2"
   [[ -f "$SHARE_DIR/$name" ]] || die "missing template $SHARE_DIR/$name"
-  local nproc_val
-  nproc_val="$(nproc 2>/dev/null || echo 4)"
+  local nproc_val="${NPROC:-$(nproc 2>/dev/null || echo 4)}"
+  case "$nproc_val" in
+    ''|*[!0-9]*) die "refusing to substitute non-numeric NPROC='$nproc_val' into $name" ;;
+  esac
   sed -e "s|@NPROC@|$nproc_val|g" \
       -e "s|@GENTOO_PROFILE@|$GENTOO_PROFILE|g" \
       "$SHARE_DIR/$name" >"$dest"
