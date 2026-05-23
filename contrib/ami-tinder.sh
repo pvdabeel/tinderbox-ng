@@ -19,7 +19,8 @@
 #   TINDER_MATRIX_MODE                  --pretend (default) or --build
 #   TINDER_SKIP_BOOTSTRAP=1             skip bootstrap (baseline must exist)
 #   TINDER_SKIP_MATRIX=1                bootstrap/doctor only
-#   TINDER_TMPFS_SIZE                   override tmpfs cap (e.g. 1200G)
+#   TINDER_TMPFS_SIZE                   tmpfs cap (e.g. 1200G); 0 skips tmpfs
+#                                       and uses disk at $TINDERBOX_ROOT
 #   TINDERBOX_REBOOTSTRAP=1             replace an existing baseline
 #   NPROC                               inner MAKEOPTS / emerge --jobs pin
 
@@ -145,7 +146,17 @@ _install_tinderbox_ng() {
 
 _mount_tmpfs() {
   local size="$1"
-  install -d "$TINDERBOX_ROOT"
+  install -d "$TINDERBOX_ROOT" \
+           "$TINDERBOX_ROOT/shared/distfiles" \
+           "$TINDERBOX_ROOT/shared/binpkgs" \
+           "$TINDERBOX_ROOT/shared/ccache" \
+           "$TINDERBOX_ROOT/sessions" \
+           "$TINDERBOX_ROOT/logs" \
+           "$TINDERBOX_ROOT/reports"
+  if [[ -z "$size" || "$size" == "0" || "$size" == "0G" ]]; then
+    _log "skip tmpfs (TINDER_TMPFS_SIZE=$size); using disk at $TINDERBOX_ROOT"
+    return 0
+  fi
   if mountpoint -q "$TINDERBOX_ROOT" 2>/dev/null; then
     local fstype
     fstype="$(findmnt -no FSTYPE --target "$TINDERBOX_ROOT" 2>/dev/null || true)"
@@ -169,7 +180,7 @@ _print_stats() {
   _log "matrix run: $run"
   echo ""
   echo "========== tinderbox-ng matrix statistics =========="
-  "$TINDERBOX_ENTRY" progress --run "$run" 2>/dev/null || true
+  "$TINDERBOX_ENTRY" progress --once --run "$run" 2>/dev/null || true
   if [[ -f "$run/results.tsv" ]]; then
     echo ""
     echo "results.tsv: $run/results.tsv"
