@@ -1255,7 +1255,7 @@ bootstrap_claim_app_alternatives() {
   log_info "claim stage3 orphan tool paths (app-alternatives)"
   in_baseline_chroot bash -e <<'EOF'
 . /etc/profile
-local -a alts=(
+alts=(
   app-alternatives/awk
   app-alternatives/bc
   app-alternatives/bzip2
