@@ -1226,8 +1226,38 @@ EOF
   log_ok "kernel sources installed; /usr/src/linux symlink set in baseline"
 }
 
+# portage-ng's config.pl consults Source/Config/Private/{passwords,api_key}.pl.
+# Those files are gitignored (only template_*.pl ships in the repo). Fresh
+# git clones / rsyncs therefore fail kb load until the stubs exist. Copy from
+# the shipped templates with empty credentials — fine for tinderbox-ng compare
+# runs that do not use digest auth or LLM keys.
+_ensure_portage_ng_private_config() {
+  local png_root="$1"
+  local priv="$png_root/Source/Config/Private"
+  local pair dst tpl
+
+  [[ -d "$png_root" ]] || return 0
+  install -d "$priv"
+
+  for pair in api_key passwords; do
+    dst="$priv/${pair}.pl"
+    tpl="$priv/template_${pair}.pl"
+    [[ -f "$dst" ]] && continue
+    if [[ -f "$tpl" ]]; then
+      cp "$tpl" "$dst"
+      log_info "  stub $dst (from template)"
+    else
+      : >"$dst"
+      log_warn "  stub $dst (empty; template_${pair}.pl missing)"
+    fi
+  done
+}
+
 bootstrap_install_portage_ng() {
   log_info "installing portage-ng into baseline at $CHROOT_PORTAGE_NG"
+
+  [[ -z "$PORTAGE_NG_URL" && -n "$PORTAGE_NG_LOCAL" ]] \
+    && _ensure_portage_ng_private_config "$PORTAGE_NG_LOCAL"
 
   if [[ -n "$PORTAGE_NG_URL" ]]; then
     in_baseline_chroot bash -e <<EOF
@@ -1243,6 +1273,8 @@ EOF
           --exclude='Source/Snapshots/' \
           "$PORTAGE_NG_LOCAL/" "$BASELINE_DIR$CHROOT_PORTAGE_NG/"
   fi
+
+  _ensure_portage_ng_private_config "$BASELINE_DIR$CHROOT_PORTAGE_NG"
 
   install -m 0755 "$SHARE_DIR/portage-ng-dev.in" "$BASELINE_DIR/usr/local/bin/portage-ng-dev"
   sed -i "s|@PORTAGE_NG_ROOT@|$CHROOT_PORTAGE_NG|g" \
@@ -1520,11 +1552,14 @@ EOF
     # re-parse the whole tree from md5-cache. The exclude paths mirror the
     # repository's .gitignore exactly: Knowledge/ and Source/Certificates/ +
     # Source/Private/ live at repository roots, NOT under Source/Knowledge/.
+    [[ -n "$PORTAGE_NG_LOCAL" ]] && _ensure_portage_ng_private_config "$PORTAGE_NG_LOCAL"
     rsync -a --delete \
           --exclude='.git/objects/pack/*.idx.lock' \
           --exclude='Source/Snapshots/' \
           --exclude='Source/Certificates/' \
           --exclude='Source/Private/' \
+          --exclude='Source/Config/Private/passwords.pl' \
+          --exclude='Source/Config/Private/api_key.pl' \
           --exclude='Knowledge/kb.qlf' \
           --exclude='Knowledge/kb.raw' \
           --exclude='Knowledge/profile.qlf' \
@@ -1534,6 +1569,7 @@ EOF
           --exclude='Knowledge/resume.pl' \
           --exclude='Source/Knowledge/Sets/**/*.local' \
           "$PORTAGE_NG_LOCAL/" "$BASELINE_DIR$CHROOT_PORTAGE_NG/"
+    _ensure_portage_ng_private_config "$BASELINE_DIR$CHROOT_PORTAGE_NG"
   fi
 
   log_info "refreshing in-baseline portage-ng-dev shim and tinderbox-matrix helper"
