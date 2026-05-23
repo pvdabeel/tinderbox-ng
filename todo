@@ -2,6 +2,7 @@
 
 - test hyperthreading results on aws
 
+- load avg myaws
 
 Tinderbox-ng is now just essentially a script that takes a stage3, adds prolog, kernel sources, portage-ng and copies in a few configuration files. 
 
