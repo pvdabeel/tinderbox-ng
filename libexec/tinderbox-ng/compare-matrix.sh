@@ -78,6 +78,8 @@ done
   echo "--jobs must be a positive integer, got: $JOBS" >&2; exit 2
 }
 
+export TINDERBOX_MATRIX_JOBS="$JOBS"
+
 # Build PACKAGES from --manifest plus trailing positional args. Strip
 # blank lines and `#` comments. De-dup while preserving order.
 declare -a PACKAGES=()

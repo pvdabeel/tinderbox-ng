@@ -585,10 +585,21 @@ Honoured for backward compatibility with pre\-reorg flat installs.
 size cap for
 .B $TINDERBOX_ROOT/sessions
 (default
-.BR 100G ;
+.BR auto ,
+sized from host RAM and compare-matrix
+.B \-\-jobs ;
 empty or
 .B 0
-disables).
+disables; auto skips a nested mount when
+.B $TINDERBOX_ROOT
+is already
+.BR tmpfs ).
+.TP
+.B TINDERBOX_MATRIX_JOBS
+Optional hint for
+.B auto
+sessions-tmpfs sizing (set by
+.BR compare-matrix ).
 .TP
 .B TINDERBOX_CCACHE_MAX_SIZE
 Cap for the shared

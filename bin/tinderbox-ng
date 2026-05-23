@@ -130,12 +130,14 @@ TINDERBOX_MDNS_HOSTS="${TINDERBOX_MDNS_HOSTS:-mac-pro.local imac-pro.local}"
 # One shared tmpfs (rather than per-session) gives natural workload
 # balancing - a single big build can use up to the whole cap if every
 # other session is small. Set to empty to disable (sessions then live
-# on the regular host filesystem).
+# on the regular host filesystem). Tmpfs is sparse: actual RAM use only
+# grows with bytes written.
 #
-# 100G covers the comparison manifest (which excludes monsters like
-# rust/llvm/firefox/chromium) with 32 concurrent sessions. Tmpfs is
-# sparse: actual RAM use only grows with bytes written.
-TINDERBOX_SESSIONS_TMPFS_SIZE="${TINDERBOX_SESSIONS_TMPFS_SIZE:-100G}"
+# Default `auto` sizes from host RAM and expected compare-matrix
+# concurrency (see _compute_sessions_tmpfs_size). When $TINDERBOX_ROOT
+# is already a tmpfs (AWS ami-tinder), auto disables a nested mount.
+# Override with an explicit cap (e.g. 100G) or 0 to disable.
+TINDERBOX_SESSIONS_TMPFS_SIZE="${TINDERBOX_SESSIONS_TMPFS_SIZE:-auto}"
 
 # ccache shared cache size (host-side, bind-mounted into every session at
 # /var/cache/ccache). Sized for the 1000-package comparison matrix which
@@ -250,13 +252,65 @@ sessions_tmpfs_active() {
   [[ "$fstype" == "tmpfs" ]] && [[ "$(stat -c %m "$SESSIONS_DIR" 2>/dev/null)" == "$SESSIONS_DIR" ]]
 }
 
+_host_mem_gib() {
+  local mem_kib
+  mem_kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  echo $(( (mem_kib + 1048575) / 1024 / 1024 ))
+}
+
+_tinderbox_root_on_tmpfs() {
+  [[ -d "$TINDERBOX_ROOT" ]] || return 1
+  [[ "$(findmnt -no FSTYPE --target "$TINDERBOX_ROOT" 2>/dev/null)" == "tmpfs" ]]
+}
+
+# Estimate a sessions-tmpfs cap from RAM and compare concurrency. Each
+# active compare holds two overlay sessions (portage-ng + emerge); budget
+# ~4 GiB per session for --build workdirs (portage_tmpdir + upper).
+_compute_sessions_tmpfs_size() {
+  local mem_gib nproc_logical jobs_hint need_gib cap_gib
+
+  if _tinderbox_root_on_tmpfs; then
+    echo 0
+    return 0
+  fi
+
+  mem_gib="$(_host_mem_gib)"
+  (( mem_gib < 1 )) && { echo 100G; return 0; }
+
+  if [[ -n "${TINDERBOX_MATRIX_JOBS:-}" && "${TINDERBOX_MATRIX_JOBS}" =~ ^[0-9]+$ ]]; then
+    jobs_hint="$TINDERBOX_MATRIX_JOBS"
+  else
+    nproc_logical="$(nproc 2>/dev/null || echo 4)"
+    jobs_hint=$(( nproc_logical / 2 ))
+    (( jobs_hint < 1 )) && jobs_hint=1
+    local mem_jobs=$(( mem_gib / 8 ))
+    (( jobs_hint > mem_jobs )) && jobs_hint=$mem_jobs
+  fi
+
+  need_gib=$(( jobs_hint * 2 * 4 ))
+  cap_gib=$(( mem_gib * 70 / 100 ))
+  (( need_gib > cap_gib )) && need_gib=$cap_gib
+  (( need_gib < 32 )) && need_gib=32
+  echo "${need_gib}G"
+}
+
+_resolve_sessions_tmpfs_size() {
+  local configured="${1:-${TINDERBOX_SESSIONS_TMPFS_SIZE:-auto}}"
+  case "$configured" in
+    ''|0) echo 0 ;;
+    auto|AUTO) _compute_sessions_tmpfs_size ;;
+    *) echo "$configured" ;;
+  esac
+}
+
 # Mount tmpfs over $SESSIONS_DIR if requested by config and not already
 # mounted. Idempotent and flock-protected so concurrent callers (e.g. 16
 # parallel `tinderbox-ng compare` workers driven by compare-matrix.sh)
 # don't race to mount the same target. No-op when
 # TINDERBOX_SESSIONS_TMPFS_SIZE is empty or '0'.
 _ensure_sessions_tmpfs() {
-  local size="$TINDERBOX_SESSIONS_TMPFS_SIZE"
+  local size
+  size="$(_resolve_sessions_tmpfs_size)"
   [[ -n "$size" && "$size" != "0" ]] || return 0
   install -d "$SESSIONS_DIR"
   local lock="$TINDERBOX_ROOT/.sessions-tmpfs.lock"
@@ -269,7 +323,11 @@ _ensure_sessions_tmpfs() {
       log_warn "$SESSIONS_DIR not empty; tmpfs mount will hide existing sessions"
       log_warn "  destroy them first or unset TINDERBOX_SESSIONS_TMPFS_SIZE to keep them"
     fi
-    log_info "mounting tmpfs (size=$size) over $SESSIONS_DIR"
+    if [[ "${TINDERBOX_SESSIONS_TMPFS_SIZE:-auto}" == auto ]]; then
+      log_info "mounting sessions tmpfs (auto size=$size; host RAM $(_host_mem_gib)GiB)"
+    else
+      log_info "mounting tmpfs (size=$size) over $SESSIONS_DIR"
+    fi
     if ! mount -t tmpfs -o "size=$size,mode=0755,nosuid,nodev" \
                 tinderbox-sessions "$SESSIONS_DIR"; then
       die "tmpfs mount on $SESSIONS_DIR failed (size=$size)"
@@ -688,19 +746,26 @@ cmd_doctor() {
   # tmpfs sizing - if RAM < requested tmpfs cap warn the operator. Skipped
   # silently on non-Linux (no /proc/meminfo); doctor is meant for Linux hosts
   # but we want the dev-box dry-run to stay clean.
-  if [[ -n "$TINDERBOX_SESSIONS_TMPFS_SIZE" && "$TINDERBOX_SESSIONS_TMPFS_SIZE" != "0" ]] && [[ -r /proc/meminfo ]]; then
-    local mem_kib mem_gib cap_gib
-    mem_kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-    mem_gib=$(( mem_kib / 1024 / 1024 ))
-    cap_gib="${TINDERBOX_SESSIONS_TMPFS_SIZE%[Gg]}"
+  local sessions_tmpfs_resolved
+  sessions_tmpfs_resolved="$(_resolve_sessions_tmpfs_size)"
+  if [[ -n "$sessions_tmpfs_resolved" && "$sessions_tmpfs_resolved" != "0" ]] && [[ -r /proc/meminfo ]]; then
+    local mem_gib cap_gib
+    mem_gib="$(_host_mem_gib)"
+    cap_gib="${sessions_tmpfs_resolved%[Gg]}"
     if [[ "$cap_gib" =~ ^[0-9]+$ ]] && (( cap_gib > 0 )); then
       if (( mem_gib > 0 && cap_gib > mem_gib )); then
-        log_warn "tmpfs cap ${TINDERBOX_SESSIONS_TMPFS_SIZE} > host RAM ${mem_gib}G (sparse, but may swap)"
+        log_warn "sessions tmpfs cap ${sessions_tmpfs_resolved} > host RAM ${mem_gib}G (sparse, but may swap)"
         warn=$((warn+1))
       else
-        log_ok "tmpfs cap ${TINDERBOX_SESSIONS_TMPFS_SIZE} (host RAM: ${mem_gib}G)"
+        if [[ "${TINDERBOX_SESSIONS_TMPFS_SIZE:-auto}" == auto ]]; then
+          log_ok "sessions tmpfs auto=${sessions_tmpfs_resolved} (host RAM: ${mem_gib}G)"
+        else
+          log_ok "sessions tmpfs cap ${sessions_tmpfs_resolved} (host RAM: ${mem_gib}G)"
+        fi
       fi
     fi
+  elif [[ "$sessions_tmpfs_resolved" == "0" ]] && _tinderbox_root_on_tmpfs; then
+    log_ok "sessions tmpfs disabled (auto: \$TINDERBOX_ROOT is tmpfs)"
   fi
 
   # mDNS resolution (optional but commonly needed for *.local)
@@ -3031,7 +3096,7 @@ cmd_tmpfs_up() {
     return 0
   fi
   _ensure_sessions_tmpfs
-  log_ok "sessions tmpfs mounted (size=$TINDERBOX_SESSIONS_TMPFS_SIZE)"
+  log_ok "sessions tmpfs mounted (size=$(_resolve_sessions_tmpfs_size))"
   findmnt -no SOURCE,FSTYPE,SIZE,OPTIONS --target "$SESSIONS_DIR"
 }
 
@@ -3114,7 +3179,19 @@ cmd_status() {
                               | tail -n +2 | tr -d 'G')
     printf '  sessions tmpfs       active: %sG used / %sG avail / %sG cap\n' "${used:-?}" "${avail:-?}" "${sz:-?}"
   else
-    printf '  sessions tmpfs       inactive (TINDERBOX_SESSIONS_TMPFS_SIZE=%s)\n' "${TINDERBOX_SESSIONS_TMPFS_SIZE:-unset}"
+    local resolved
+    resolved="$(_resolve_sessions_tmpfs_size)"
+    if [[ "$resolved" == "0" ]]; then
+      if _tinderbox_root_on_tmpfs; then
+        printf '  sessions tmpfs       inactive (auto: TINDERBOX_ROOT is tmpfs)\n'
+      else
+        printf '  sessions tmpfs       inactive (TINDERBOX_SESSIONS_TMPFS_SIZE=%s)\n' \
+          "${TINDERBOX_SESSIONS_TMPFS_SIZE:-unset}"
+      fi
+    else
+      printf '  sessions tmpfs       inactive (configured=%s; resolved cap=%s)\n' \
+        "${TINDERBOX_SESSIONS_TMPFS_SIZE:-auto}" "$resolved"
+    fi
   fi
 }
 
@@ -4535,7 +4612,11 @@ Subcommands:
 Environment:
   TINDERBOX_ROOT                  Root for everything (default /srv/tinderbox-ng).
   TINDERBOX_SESSIONS_TMPFS_SIZE   tmpfs size cap for $TINDERBOX_ROOT/sessions
-                                  (default 100G; empty/0 disables).
+                                  (default auto: sized from RAM and compare
+                                  --jobs; 0 or empty disables; nested mount
+                                  is skipped when $TINDERBOX_ROOT is tmpfs).
+  TINDERBOX_MATRIX_JOBS           Hint for auto sessions-tmpfs sizing when
+                                  set by compare-matrix (usually leave unset).
   TINDERBOX_CCACHE_MAX_SIZE       Cap for the shared ccache (default 100G).
                                   Read by bootstrap_install_ccache and the
                                   `install-ccache` retrofit subcommand.
