@@ -1,3 +1,8 @@
+- treat local running vm same as aws vm: tinder profile extension -> fetches tinder script, which then bootstraps. maybe extend myaws with local vm detection / snapshot 
+
+- test hyperthreading results on aws
+
+
 Tinderbox-ng is now just essentially a script that takes a stage3, adds prolog, kernel sources, portage-ng and copies in a few configuration files. 
 
 For each package in the manifest list (packages to be build), it layers an overlayfs over the modifed stage3 baseline and calls a package manager to build the target. This is a "session".
