@@ -2333,6 +2333,15 @@ _compare_salvage_buildlogs() {
 # emit any (only the legacy graph-mode .emerge wrappers did) and
 # portage-ng's --ci pretend path likewise does not currently emit them.
 
+# _compare_sanitize_label <package-atom>
+#
+# Filesystem-safe compare label. Must stay in sync with compare-matrix.sh
+# (translate '+' -> 'p' before collapsing non-alnum) so ad-hoc compares
+# and matrix runs never collide on session names (bonnie vs bonnie++, …).
+_compare_sanitize_label() {
+  printf '%s' "$1" | tr '+' 'p' | tr -c '[:alnum:]' '_' | sed 's/^_*//;s/_*$//'
+}
+
 # _compare_run_pass <log> <session> <command-string>
 #
 # Runs the command in a fresh mount namespace inside the given session,
@@ -2393,7 +2402,7 @@ cmd_compare() {
 
   local target="${positional[*]}"
   if [[ -z "$label" ]]; then
-    label="$(printf '%s' "$target" | tr -c '[:alnum:]' '_' | sed 's/^_//;s/_$//' | head -c 40)"
+    label="$(_compare_sanitize_label "$target" | head -c 40)"
   fi
 
   local sess_pn="pkg-cmp-portage-ng-$label"
@@ -2984,13 +2993,7 @@ CONT_HELP
   fi
 
   local cm="$LIBEXEC_DIR/compare-matrix.sh"
-  if [[ ! -x "$cm" ]]; then
-    if [[ -x /usr/local/sbin/compare-matrix ]]; then
-      cm="/usr/local/sbin/compare-matrix"
-    else
-      die "compare-matrix script not found (looked at $LIBEXEC_DIR/compare-matrix.sh and /usr/local/sbin/compare-matrix)"
-    fi
-  fi
+  [[ -x "$cm" ]] || die "compare-matrix script not found at $cm (re-run deploy-host.sh)"
 
   # We pass --resume-dir so compare-matrix.sh appends to the original
   # run's results.tsv (and meta.txt as a "resumed at" block) instead of

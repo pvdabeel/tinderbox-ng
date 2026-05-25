@@ -78,6 +78,7 @@ DO_REFRESH_BASELINE_CONFIG=0
 DO_SELFTEST=0
 REMOTE_PREFIX=/usr/local/share/tinderbox-ng
 REMOTE_LINK=/usr/local/sbin/tinderbox-ng
+REMOTE_COMPARE_MATRIX_LINK=/usr/local/sbin/compare-matrix
 REMOTE=""
 
 while [[ $# -gt 0 ]]; do
@@ -177,11 +178,17 @@ rsync -a --delete "${_rsync_excludes[@]}" \
 rsync -a --delete "${_rsync_excludes[@]}" \
   "$REPO_ROOT/" "$REMOTE:$REMOTE_PREFIX/"
 
-# 2. Symlink the entry point + manpage.
+# 2. Symlink host entry points + manpage.
 log "step 2/4: symlink $REMOTE_LINK -> $REMOTE_PREFIX/bin/tinderbox-ng"
 remote_root "install -d $(dirname $(printf '%q' "$REMOTE_LINK")) && \
              ln -sfn $(printf '%q' "$REMOTE_PREFIX/bin/tinderbox-ng") $(printf '%q' "$REMOTE_LINK") && \
              chmod +x $(printf '%q' "$REMOTE_PREFIX/bin/tinderbox-ng")"
+
+log "step 2/4: symlink $REMOTE_COMPARE_MATRIX_LINK -> $REMOTE_PREFIX/libexec/tinderbox-ng/compare-matrix.sh"
+remote_root "install -d $(dirname $(printf '%q' "$REMOTE_COMPARE_MATRIX_LINK")) && \
+             ln -sfn $(printf '%q' "$REMOTE_PREFIX/libexec/tinderbox-ng/compare-matrix.sh") \
+                     $(printf '%q' "$REMOTE_COMPARE_MATRIX_LINK") && \
+             chmod +x $(printf '%q' "$REMOTE_PREFIX/libexec/tinderbox-ng/compare-matrix.sh")"
 
 # Manpage: link tinderbox-ng.8 from the rsynced share/man/man8/ tree onto
 # the canonical /usr/local/share/man/man8/ path so `man tinderbox-ng` works
