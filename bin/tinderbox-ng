@@ -2063,7 +2063,7 @@ cmd_portage_ng() {
   done
   [[ ${#positional[@]} -gt 0 ]] || die "no portage-ng arguments after flags"
 
-  local cmd="cd /opt/portage-ng && timeout ${TINDERBOX_BUILD_TIMEOUT:-7200} ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci $mode_flag ${positional[*]}"
+  local cmd="cd /opt/portage-ng && timeout ${TINDERBOX_BUILD_TIMEOUT:-43200} ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci $mode_flag ${positional[*]}"
   cmd_exec "$name" -- "$cmd"
 }
 
@@ -2079,7 +2079,7 @@ cmd_emerge() {
   # Default to --oneshot so we don't pollute @world. Caller can override
   # by passing their own emerge atoms/flags after the session name.
   local emerge_flags="--color=y --oneshot --verbose"
-  local cmd="timeout ${TINDERBOX_BUILD_TIMEOUT:-7200} /usr/bin/emerge $emerge_flags $*"
+  local cmd="timeout ${TINDERBOX_BUILD_TIMEOUT:-43200} /usr/bin/emerge $emerge_flags $*"
   cmd_exec "$name" -- "$cmd"
 }
 
@@ -2434,15 +2434,13 @@ cmd_compare() {
   # everything in dev-ada/*, all sequoia-* crates, …). Running both passes
   # under one fat timeout means a slow planner can starve the build, or a
   # legitimate-but-long build trips the planner-tuned ceiling.
-  # TINDERBOX_BUILD_TIMEOUT preserves the legacy single-knob default
-  # (7200s) but is now used as the build-pass timeout only; if an operator
-  # bumps it, both engines see the new value. TINDERBOX_PLAN_TIMEOUT is
-  # new and defaults to 1800s; if an operator already set
-  # TINDERBOX_BUILD_TIMEOUT explicitly we still honour that as the upper
-  # bound for the plan pass (`min(plan_default, build)` semantics) so we
-  # don't surprise anyone who tightened the legacy single-knob to a small
-  # value to bound a quick smoke matrix.
-  local BUILD_TO="${TINDERBOX_BUILD_TIMEOUT:-14400}"
+  # TINDERBOX_BUILD_TIMEOUT is the build-pass timeout for both engines; if
+  # an operator bumps it, both see the new value. TINDERBOX_PLAN_TIMEOUT
+  # defaults to 1800s; if an operator already set TINDERBOX_BUILD_TIMEOUT
+  # explicitly we still honour that as the upper bound for the plan pass
+  # (`min(plan_default, build)` semantics) so we don't surprise anyone who
+  # tightened the knob to a small value to bound a quick smoke matrix.
+  local BUILD_TO="${TINDERBOX_BUILD_TIMEOUT:-43200}"
   local PLAN_TO="${TINDERBOX_PLAN_TIMEOUT:-1800}"
   if (( PLAN_TO > BUILD_TO )); then PLAN_TO="$BUILD_TO"; fi
   local pn_plan_cmd="cd /opt/portage-ng && timeout $PLAN_TO ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci --pretend $target"
@@ -4634,7 +4632,7 @@ Environment:
                                   --pretend pass for both engines. Capped
                                   at TINDERBOX_BUILD_TIMEOUT.
   TINDERBOX_BUILD_TIMEOUT         Per-package build timeout in seconds
-                                  (default 14400 = 4h). Used by `compare`'s
+                                  (default 43200 = 12h). Used by `compare`'s
                                   --build pass for both engines, and by
                                   `pn`/`em` standalone runs.
   TINDERBOX_LIBEXEC_DIR           Override location of executable helpers
