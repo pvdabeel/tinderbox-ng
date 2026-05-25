@@ -511,11 +511,14 @@ in `refresh-kb` output, one of the above is broken.
 ### gentoo-sources baseline
 
 `bootstrap_install_kernel_sources()` emerges
-`sys-kernel/gentoo-sources` into the baseline and sets
-`/usr/src/linux` symlink. Configurable via
-`TINDERBOX_KERNEL_PACKAGE`. Retrofit on an existing baseline with
-`tinderbox-ng install-kernel-sources`. Required because some ebuilds
-probe `/usr/src/linux` during `pkg_setup`.
+`sys-kernel/gentoo-sources` into the baseline, sets
+`/usr/src/linux` via `eselect kernel set 1`, and runs
+`make defconfig`, `make modules_prepare`, and `make modules` when
+`Module.symvers` is absent (required by `linux-mod-r1` ebuilds).
+Configurable via `TINDERBOX_KERNEL_PACKAGE`. Retrofit on an existing
+baseline with `tinderbox-ng install-kernel-sources`. Kernel-mod compare
+targets live in `share/tinderbox-ng/manifest-kernel-modules.txt`
+(split from `manifest-failures.txt`).
 
 ### `git checkout master` is fragile
 

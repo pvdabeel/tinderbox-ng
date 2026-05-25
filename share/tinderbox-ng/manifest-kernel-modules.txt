@@ -1,0 +1,27 @@
+# Out-of-tree / in-tree kernel module targets (linux-mod-r1 eclass).
+#
+# These require /usr/src/linux/Module.symvers in the baseline lower layer.
+# Bootstrap and `tinderbox-ng install-kernel-sources` run:
+#   make defconfig && make modules_prepare && make modules
+#
+# Use this manifest for compare-matrix regression of kernel-module builds
+# after bootstrap or a kernel-sources retrofit — not mixed into
+# manifest-failures.txt, which tracks general resolver/build failures
+# unrelated to baseline kernel prep.
+#
+# See: https://github.com/pvdabeel/tinderbox-ng/issues/1
+app-admin/ryzen_monitor
+app-admin/ryzen_smu
+app-antivirus/lkrg
+app-emulation/virtualbox-guest-modules
+app-emulation/virtualbox-modules
+app-laptop/framework-laptop-kmod
+dev-util/lttng-modules
+sci-libs/linux-gpib-modules
+sys-fs/vhba
+sys-fs/zfs-kmod
+sys-kernel/cryptodev
+sys-kernel/kpatch
+sys-kernel/udev-hid-bpf
+sys-kernel/scx-loader
+x11-drivers/nvidia-drivers

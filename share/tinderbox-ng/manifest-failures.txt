@@ -1,3 +1,7 @@
+# General failure-regression manifest for compare-matrix.
+# Linux-mod / out-of-tree module targets (require baseline Module.symvers) are
+# in manifest-kernel-modules.txt — run that manifest after bootstrap or
+# `tinderbox-ng install-kernel-sources` on retrofitted baselines.
 acct-user/buildbot
 app-accessibility/julius
 app-accessibility/yasr
@@ -6,10 +10,7 @@ app-admin/calamares
 app-accessibility/caribou
 app-admin/kio-admin
 app-admin/multilog-watch
-app-admin/ryzen_monitor
-app-admin/ryzen_smu
 app-admin/mkosi
-app-antivirus/lkrg
 app-arch/hardlink
 app-admin/systemdgenie
 app-arch/stuffit
@@ -102,9 +103,7 @@ app-emulation/protontricks
 app-emulation/softgun
 app-emulation/guestfs-tools
 app-emulation/vendor-reset
-app-emulation/virtualbox-guest-modules
 app-emulation/virtualbox
-app-emulation/virtualbox-modules
 app-emulation/virtualbox-guest-additions
 app-emulation/virtualbox-extpack-oracle
 app-emulation/virtualbox-kvm
@@ -121,7 +120,6 @@ app-i18n/ibus-skk
 app-i18n/kanjipad
 app-i18n/skktools
 app-i18n/nabi
-app-laptop/framework-laptop-kmod
 app-laptop/dispad
 app-laptop/tp_smapi
 app-laptop/tpacpi-bat
@@ -560,7 +558,6 @@ dev-util/intel-ocl-sdk
 dev-util/kdstatemachineeditor
 dev-util/kernelshark
 dev-util/kio-perldoc
-dev-util/lttng-modules
 dev-util/llvm-mingw64
 dev-util/gnome-builder
 dev-util/mingw64-runtime
@@ -1588,7 +1585,6 @@ sci-libs/hipSPARSE
 sci-libs/hipsparselt
 sci-libs/lemon
 sci-libs/linux-gpib
-sci-libs/linux-gpib-modules
 sci-libs/lrslib
 sci-libs/netcdf-cxx
 sci-libs/miopen
@@ -1742,27 +1738,21 @@ sys-fs/rar2fs
 sys-apps/polychromatic
 sys-fs/sanoid
 sys-fs/static-dev
-sys-fs/vhba
 sys-fs/zfs
-sys-fs/zfs-kmod
 sys-fs/zfs-auto-snapshot
-sys-kernel/cryptodev
 sys-kernel/gnumach
 sys-kernel/hurd
 sys-devel/kgcc64
 sys-kernel/linux-next
 sys-kernel/mips-sources
-sys-kernel/kpatch
 sys-kernel/rumpkernel
 sys-libs/argp-standalone
 sys-kernel/gentoo-kernel
-sys-kernel/udev-hid-bpf
 sys-kernel/vanilla-kernel
 sys-libs/error-standalone
 sys-kernel/scx
 sys-fs/treesize
 sys-libs/fts-standalone
-sys-kernel/scx-loader
 sys-cluster/ceph
 sys-libs/ldb
 sys-libs/libseccomp
@@ -1846,7 +1836,6 @@ www-plugins/lightspark
 www-servers/uwsgi
 sys-kernel/raspberrypi-image
 www-servers/h2o
-x11-drivers/nvidia-drivers
 www-client/qutebrowser
 x11-libs/dnd
 x11-libs/gtk-mac-integration

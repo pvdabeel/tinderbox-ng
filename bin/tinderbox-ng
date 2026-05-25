@@ -1352,11 +1352,13 @@ EOF
 # scrape the kernel tree fail at src_configure with "no /usr/src/linux"
 # or "include/linux not found".
 #
-# We don't BUILD a kernel here -- the matrix never boots the chroot --
-# we just need the source tree on disk and `/usr/src/linux` pointing at
-# it so kbuild header lookups resolve. `eselect kernel set 1` does that
-# wiring; gentoo-sources also accepts USE=symlink as an alternative,
-# but eselect is more explicit and survives package upgrades cleanly.
+# The matrix never boots the chroot, but linux-mod-r1 ebuilds still
+# require a *built* tree marker: `/usr/src/linux/Module.symvers`.
+# defconfig + modules_prepare alone satisfy header lookups
+# (autoconf.h) yet still fail `_modules_sanity_kernelbuilt()` with
+# "built kernel sources are required to build kernel modules".
+# `make modules` after defconfig is the minimum baseline cost that
+# produces Module.symvers without installing a bootable kernel image.
 #
 # Kernel sources are baseline-shared via the overlay lower layer: every
 # session sees the same /usr/src/linux* without paying for a copy-up
@@ -1366,10 +1368,14 @@ EOF
 #
 # Idempotent: re-emerging an installed gentoo-sources is a no-op for
 # Portage; eselect-set on an already-correct symlink is a no-op too.
+# Kernel prep skips work when Module.symvers is present and newer than
+# .config; re-runs after a kernel-source bump rebuild modules only.
 #
 # Override the package via TINDERBOX_KERNEL_PACKAGE if you need a
 # specific kernel flavour (e.g. `sys-kernel/vanilla-sources`,
 # `sys-kernel/gentoo-kernel`); the eselect step is unconditional.
+# Linux-mod regression targets live in share/tinderbox-ng/manifest-kernel-modules.txt
+# (split from manifest-failures.txt so stale baselines do not spam fail/fail).
 bootstrap_install_kernel_sources() {
   local kernel_pkg="${TINDERBOX_KERNEL_PACKAGE:-sys-kernel/gentoo-sources}"
   log_info "emerge $kernel_pkg into baseline (provides /usr/src/linux for ebuilds that probe kernel headers)"
@@ -1386,22 +1392,31 @@ if eselect kernel list 2>/dev/null | grep -qE '^[[:space:]]*\['; then
 else
   echo "warn: eselect kernel found no installed kernel sources" >&2
 fi
-# Configure the tree so linux-mod-r1 ebuilds (nvidia-drivers,
-# vhba, ryzen_smu, virtualbox-guest-modules, lkrg, scap-driver, ...)
-# pass their pkg_setup() check, which reads /usr/src/linux/.config and
-# /usr/src/linux/include/generated/autoconf.h. Without this the entire
-# out-of-tree-module cluster fails fail/fail in the matrix even though
-# both engines plan correctly. defconfig + modules_prepare is the
-# minimum that satisfies linux-info_pkg_setup().
-if [[ -L /usr/src/linux ]] && [[ ! -f /usr/src/linux/.config ]]; then
-  echo "configuring kernel sources for linux-mod ebuilds"
-  pushd "\$(readlink -f /usr/src/linux)" >/dev/null
-  make -s defconfig
-  make -s -j"\$(nproc)" modules_prepare
-  popd >/dev/null
+# Prep the tree for linux-mod-r1 (vhba, lkrg, ryzen_smu, nvidia-drivers,
+# virtualbox-guest-modules, zfs-kmod, ...). pkg_setup() reads .config,
+# autoconf.h, and Module.symvers.
+if [[ -e /usr/src/linux ]]; then
+  kdir="\$(readlink -f /usr/src/linux)"
+  if [[ -d "\$kdir" ]]; then
+    echo "preparing kernel sources for linux-mod ebuilds under \$kdir"
+    pushd "\$kdir" >/dev/null
+    if [[ ! -f .config ]]; then
+      echo "  make defconfig"
+      make -s defconfig
+    fi
+    if [[ ! -f include/generated/autoconf.h ]]; then
+      echo "  make modules_prepare"
+      make -s -j"\$(nproc)" modules_prepare
+    fi
+    if [[ ! -f Module.symvers ]] || [[ .config -nt Module.symvers ]]; then
+      echo "  make modules (Module.symvers for linux-mod-r1; one-time baseline cost)"
+      make -s -j"\$(nproc)" modules
+    fi
+    popd >/dev/null
+  fi
 fi
 EOF
-  log_ok "kernel sources installed; /usr/src/linux symlink set in baseline"
+  log_ok "kernel sources installed; /usr/src/linux ready (Module.symvers for linux-mod ebuilds)"
 }
 
 # portage-ng's config.pl consults Source/Config/Private/{passwords,api_key}.pl.
@@ -1816,11 +1831,15 @@ cmd_install_ccache() {
 # Equivalent to running `bootstrap_install_kernel_sources` standalone.
 # Idempotent: safe to re-run after a kernel-source version bump in the
 # tree -- emerge re-installs (or no-ops), eselect re-points the
-# /usr/src/linux symlink at the highest installed version.
+# /usr/src/linux symlink at the highest installed version, and the
+# defconfig/modules_prepare/modules prep re-runs when Module.symvers is
+# stale or missing.
 #
 # Use this when:
 #   - You bootstrapped on a tinderbox-ng revision before kernel sources
 #     were part of the bootstrap pipeline (this is the migration case).
+#   - You bootstrapped before `make modules` was added and linux-mod
+#     compares fail with "built kernel sources are required".
 #   - You want to flip TINDERBOX_KERNEL_PACKAGE (e.g. swap gentoo-sources
 #     for vanilla-sources) without throwing the baseline away.
 #   - The pinned tree picked up a kernel-source revbump and you want
@@ -4625,11 +4644,11 @@ Environment:
                                   baseline (default sys-kernel/gentoo-sources).
                                   Read by bootstrap_install_kernel_sources and
                                   the `install-kernel-sources` retrofit. The
-                                  installed tree is also `make defconfig`'d
-                                  + `modules_prepare`'d so linux-mod ebuilds
-                                  (nvidia-drivers, vhba, ryzen_smu, lkrg,
-                                  virtualbox-guest-modules, ...) pass their
-                                  pkg_setup() check inside sessions.
+                                  installed tree is also `make defconfig`'d,
+                                  `modules_prepare`'d, and `make modules`'d so
+                                  linux-mod ebuilds see Module.symvers.
+                                  Kernel-mod matrix targets:
+                                  share/tinderbox-ng/manifest-kernel-modules.txt
   TINDERBOX_PLAN_TIMEOUT          Per-package planning timeout in seconds
                                   (default 1800). Used by `compare`'s
                                   --pretend pass for both engines. Capped

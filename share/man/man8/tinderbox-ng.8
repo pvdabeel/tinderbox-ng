@@ -133,6 +133,18 @@ into an existing baseline and set
 .I /usr/src/linux
 via
 .BR "eselect kernel set 1" .
+Runs
+.BR "make defconfig" ,
+.BR "make modules_prepare" ,
+and
+.B make modules
+when
+.I Module.symvers
+is absent so
+.B linux\-mod
+ebuilds pass
+.BR linux\-mod\-r1_pkg_setup ()
+inside sessions.
 Required for ebuilds that probe kernel headers during
 .IR src_configure / src_compile .
 Idempotent.
@@ -610,16 +622,24 @@ Cap for the shared
 .B TINDERBOX_KERNEL_PACKAGE
 Kernel\-source package emerged into the baseline (default
 .BR sys\-kernel/gentoo\-sources ).
-The installed source tree is also configured with
+The installed source tree is configured with
 .B make defconfig
 and
 .B make modules_prepare
-so
+then built with
+.B make modules
+when
+.I Module.symvers
+is absent so
 .B linux\-mod
 ebuilds (e.g. nvidia\-drivers, vhba, ryzen_smu, lkrg,
 virtualbox\-guest\-modules) satisfy
-.BR linux\-info_pkg_setup ()
+.BR linux\-mod\-r1_pkg_setup ()
 inside sessions.
+Kernel\-mod compare targets are listed in
+.IR share/tinderbox\-ng/manifest\-kernel\-modules.txt
+(separate from
+.IR manifest\-failures.txt ).
 .TP
 .B TINDERBOX_PLAN_TIMEOUT
 Per\-package planning timeout in seconds for
