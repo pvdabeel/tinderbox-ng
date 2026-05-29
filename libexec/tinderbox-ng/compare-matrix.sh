@@ -49,6 +49,22 @@ _CM_VDB_W=4
 _CM_DELTA_W=6
 _CM_SECS_W=6
 
+# portage-ng exit labels that mean the planner/build succeeded (see
+# _compare_summarize in tinderbox-ng). Used to flag regressions in the
+# live matrix TTY (PN failed where emerge succeeded).
+_cm_pn_ok() {
+  case "$1" in
+    OK|OK\(cycles\)|OK\(assumed\)) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+_cm_em_ok() {
+  [[ "$1" == "OK" ]]
+}
+_cm_pn_regression() {
+  ! _cm_pn_ok "$1" && _cm_em_ok "$2"
+}
+
 MODE="--pretend"
 LABEL_PREFIX=""
 KEEP=0
@@ -231,6 +247,11 @@ _run_one() {
   fi
   local delta_str="($vdb_delta)"
   local idx_w=${#total}
+  local cm_red='' cm_rst=''
+  if [[ -t 1 ]] && _cm_pn_regression "$pn_exit" "$em_exit"; then
+    cm_red=$'\033[31m'
+    cm_rst=$'\033[0m'
+  fi
 
   # Mutex-protected append + status line so multiple workers don't
   # interleave their output and we never lose a TSV row.
@@ -240,7 +261,8 @@ _run_one() {
       "$pkg" "$MODE" "$pn_exit" "$em_exit" "$pn_actions" "$em_actions" \
       "$pn_completed" "$em_completed" "$pn_vdb" "$em_vdb" "$vdb_delta" "$elapsed" \
       >> "$TSV"
-    printf '[%*d/%d] %-*s  rc=%2d  pn=%-*s  em=%-*s  vdb pn=%*s em=%*s  %-*s  %*ds\n' \
+    printf '%s[%*d/%d] %-*s  rc=%2d  pn=%-*s  em=%-*s  vdb pn=%*s em=%*s  %-*s  %*ds%s\n' \
+      "$cm_red" \
       "$idx_w" "$idx" "$total" \
       "$_CM_PKG_W" "$pkg" \
       "$rc" \
@@ -249,7 +271,8 @@ _run_one() {
       "$_CM_VDB_W" "$pn_vdb" \
       "$_CM_VDB_W" "$em_vdb" \
       "$_CM_DELTA_W" "$delta_str" \
-      "$_CM_SECS_W" "$elapsed"
+      "$_CM_SECS_W" "$elapsed" \
+      "$cm_rst"
   ) 9>"$TSV_LOCK"
 
   return "$mismatch"
