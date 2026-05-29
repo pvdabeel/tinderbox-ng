@@ -49,9 +49,7 @@ _CM_VDB_W=4
 _CM_DELTA_W=6
 _CM_SECS_W=6
 
-# portage-ng exit labels that mean the planner/build succeeded (see
-# _compare_summarize in tinderbox-ng). Used to flag regressions in the
-# live matrix TTY (PN failed where emerge succeeded).
+# Exit-label helpers for live matrix TTY colouring (see _compare_summarize).
 _cm_pn_ok() {
   case "$1" in
     OK|OK\(cycles\)|OK\(assumed\)) return 0 ;;
@@ -61,8 +59,13 @@ _cm_pn_ok() {
 _cm_em_ok() {
   [[ "$1" == "OK" ]]
 }
+# PN failed where emerge succeeded (regression).
 _cm_pn_regression() {
   ! _cm_pn_ok "$1" && _cm_em_ok "$2"
+}
+# PN succeeded where emerge failed (PN-only win).
+_cm_pn_win() {
+  _cm_pn_ok "$1" && ! _cm_em_ok "$2"
 }
 
 MODE="--pretend"
@@ -247,10 +250,15 @@ _run_one() {
   fi
   local delta_str="($vdb_delta)"
   local idx_w=${#total}
-  local cm_red='' cm_rst=''
-  if [[ -t 1 ]] && _cm_pn_regression "$pn_exit" "$em_exit"; then
-    cm_red=$'\033[31m'
-    cm_rst=$'\033[0m'
+  local cm_color='' cm_rst=''
+  if [[ -t 1 ]]; then
+    if _cm_pn_regression "$pn_exit" "$em_exit"; then
+      cm_color=$'\033[31m'
+      cm_rst=$'\033[0m'
+    elif _cm_pn_win "$pn_exit" "$em_exit"; then
+      cm_color=$'\033[32m'
+      cm_rst=$'\033[0m'
+    fi
   fi
 
   # Mutex-protected append + status line so multiple workers don't
@@ -262,7 +270,7 @@ _run_one() {
       "$pn_completed" "$em_completed" "$pn_vdb" "$em_vdb" "$vdb_delta" "$elapsed" \
       >> "$TSV"
     printf '%s[%*d/%d] %-*s  rc=%2d  pn=%-*s  em=%-*s  vdb pn=%*s em=%*s  %-*s  %*ds%s\n' \
-      "$cm_red" \
+      "$cm_color" \
       "$idx_w" "$idx" "$total" \
       "$_CM_PKG_W" "$pkg" \
       "$rc" \
