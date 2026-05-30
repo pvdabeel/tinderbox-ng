@@ -2,7 +2,7 @@
 #
 # These require /usr/src/linux/Module.symvers in the baseline lower layer.
 # Bootstrap and `tinderbox-ng install-kernel-sources` run:
-#   make defconfig && make modules_prepare && make modules
+#   make defconfig && make modules_prepare && make vmlinux modules
 #
 # Use this manifest for compare-matrix regression of kernel-module builds
 # after bootstrap or a kernel-sources retrofit — not mixed into
@@ -10,6 +10,14 @@
 # unrelated to baseline kernel prep.
 #
 # See: https://github.com/pvdabeel/tinderbox-ng/issues/1
+#      https://github.com/pvdabeel/tinderbox-ng/issues/2
+#
+# cdemu frontends (linux-mod dep sys-fs/vhba — same Module.symvers requirement):
+app-cdr/cdemu
+app-cdr/cdemu-daemon
+app-cdr/gcdemu
+app-cdr/kcdemu
+app-emulation/vendor-reset
 app-admin/ryzen_monitor
 app-admin/ryzen_smu
 app-antivirus/lkrg

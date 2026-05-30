@@ -67,6 +67,10 @@ and disk\-space margin. Reports all problems in one pass and is run by
 .B bootstrap
 automatically (skip with
 .BR TINDERBOX_SKIP_DOCTOR=1 ).
+When a baseline already exists, warns if
+.I /usr/src/linux/Module.symvers
+is absent (linux\-mod ebuilds will fail setup; run
+.B install\-kernel\-sources ).
 .TP
 .B bootstrap
 Build the immutable baseline (stage3 + SWI\-Prolog +
@@ -137,14 +141,18 @@ Runs
 .BR "make defconfig" ,
 .BR "make modules_prepare" ,
 and
-.B make modules
+.BR "make vmlinux modules"
 when
 .I Module.symvers
 is absent so
 .B linux\-mod
 ebuilds pass
 .BR linux\-mod\-r1_pkg_setup ()
-inside sessions.
+inside sessions (current
+.BR gentoo-sources
+requires
+.IR vmlinux.o
+before modpost).
 Required for ebuilds that probe kernel headers during
 .IR src_configure / src_compile .
 Idempotent.

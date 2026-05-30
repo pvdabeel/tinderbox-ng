@@ -610,6 +610,30 @@ sweep_session_orphans() {
   return 0
 }
 
+# Resolve baseline /usr/src/linux and return the path to Module.symvers when
+# the linux-mod-r1 marker file exists. Empty when the symlink, tree, or file
+# is absent. Used by doctor and compare-matrix preflight (#2).
+_baseline_kernel_tree_dir() {
+  local link="$BASELINE_DIR/usr/src/linux"
+  [[ -e "$link" ]] || return 1
+  readlink -f "$link" 2>/dev/null
+}
+
+_baseline_module_symvers_path() {
+  local kdir
+  kdir="$(_baseline_kernel_tree_dir)" || return 1
+  [[ -f "$kdir/Module.symvers" ]] && printf '%s/Module.symvers\n' "$kdir"
+}
+
+# True when a baseline exists but lacks the built-tree marker linux-mod-r1
+# ebuilds require. No baseline yet → false (bootstrap will install sources).
+_baseline_module_symvers_missing() {
+  [[ -d "$BASELINE_DIR" ]] || return 1
+  local kdir
+  kdir="$(_baseline_kernel_tree_dir)" || return 0
+  [[ ! -f "$kdir/Module.symvers" ]]
+}
+
 # =============================================================================
 # Subcommand: doctor (preflight)
 # =============================================================================
@@ -862,6 +886,20 @@ cmd_doctor() {
       warn=$((warn+1))
     else
       log_ok "baseline LDFLAGS pinned (no pack-relative-relocs)"
+    fi
+
+    # linux-mod-r1 ebuilds (vhba, lkrg, virtualbox-modules, cdemu→vhba, …)
+    # require Module.symvers in the baseline lower layer. Bootstrap and
+    # install-kernel-sources run `make modules`; retrofitted baselines from
+    # before that change still lack the marker (#1, #2).
+    if _baseline_module_symvers_missing; then
+      log_warn "baseline kernel tree lacks Module.symvers (linux-mod-r1 setup will fail)"
+      log_warn "  checked: $BASELINE_DIR/usr/src/linux/Module.symvers"
+      log_warn "  retrofit (~minutes, one-time): tinderbox-ng install-kernel-sources"
+      log_warn "  kernel-module matrix: share/tinderbox-ng/manifest-kernel-modules.txt"
+      warn=$((warn+1))
+    else
+      log_ok "baseline Module.symvers present (linux-mod ebuilds OK)"
     fi
   fi
 
@@ -1357,8 +1395,10 @@ EOF
 # defconfig + modules_prepare alone satisfy header lookups
 # (autoconf.h) yet still fail `_modules_sanity_kernelbuilt()` with
 # "built kernel sources are required to build kernel modules".
-# `make modules` after defconfig is the minimum baseline cost that
-# produces Module.symvers without installing a bootable kernel image.
+# `make vmlinux modules` after defconfig is the minimum baseline cost that
+# produces Module.symvers on current gentoo-sources (7.x modpost expects
+# vmlinux.o; plain `make modules` alone aborts in modpost). We do not
+# install a bootable kernel image into the baseline.
 #
 # Kernel sources are baseline-shared via the overlay lower layer: every
 # session sees the same /usr/src/linux* without paying for a copy-up
@@ -1409,8 +1449,8 @@ if [[ -e /usr/src/linux ]]; then
       make -s -j"\$(nproc)" modules_prepare
     fi
     if [[ ! -f Module.symvers ]] || [[ .config -nt Module.symvers ]]; then
-      echo "  make modules (Module.symvers for linux-mod-r1; one-time baseline cost)"
-      make -s -j"\$(nproc)" modules
+      echo "  make vmlinux modules (Module.symvers for linux-mod-r1; one-time baseline cost)"
+      make -s -j"\$(nproc)" vmlinux modules
     fi
     popd >/dev/null
   fi
@@ -1838,7 +1878,7 @@ cmd_install_ccache() {
 # Use this when:
 #   - You bootstrapped on a tinderbox-ng revision before kernel sources
 #     were part of the bootstrap pipeline (this is the migration case).
-#   - You bootstrapped before `make modules` was added and linux-mod
+#   - You bootstrapped before `make vmlinux modules` was added and linux-mod
 #     compares fail with "built kernel sources are required".
 #   - You want to flip TINDERBOX_KERNEL_PACKAGE (e.g. swap gentoo-sources
 #     for vanilla-sources) without throwing the baseline away.

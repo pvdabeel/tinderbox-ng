@@ -133,6 +133,26 @@ done
   exit 2
 }
 
+# linux-mod-r1 ebuilds need Module.symvers in the baseline lower layer (#2).
+_tbx_root="${TINDERBOX_ROOT:-/srv/tinderbox-ng}"
+_baseline_symvers_missing() {
+  local base="$_tbx_root/baseline" kdir
+  [[ -d "$base" ]] || return 1
+  kdir="$(readlink -f "$base/usr/src/linux" 2>/dev/null)" || return 0
+  [[ ! -f "$kdir/Module.symvers" ]]
+}
+if [[ "$MODE" == "--build" ]] && _baseline_symvers_missing; then
+  _manifest_base="${MANIFEST##*/}"
+  if [[ "$_manifest_base" == "manifest-kernel-modules.txt" ]]; then
+    echo "compare-matrix: baseline lacks Module.symvers (required for manifest-kernel-modules.txt)" >&2
+    echo "  run: tinderbox-ng install-kernel-sources" >&2
+    echo "  then: tinderbox-ng doctor  (should report Module.symvers present)" >&2
+    exit 2
+  fi
+  echo "compare-matrix: warning: baseline lacks Module.symvers; linux-mod targets may spurious fail/fail" >&2
+  echo "  run: tinderbox-ng install-kernel-sources  (see manifest-kernel-modules.txt)" >&2
+fi
+
 # Output dir: either a fresh stamp dir (default) or an existing run dir
 # we are appending to (--resume-dir, used by `tinderbox-ng continue` so
 # resumed work shows up in the same TSV / dashboard / aggregate counters

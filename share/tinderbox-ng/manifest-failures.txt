@@ -20,11 +20,7 @@ app-backup/kup
 app-benchmarks/bonnie
 app-benchmarks/bonnie++
 app-cdr/dolphin-plugins-mountiso
-app-cdr/gcdemu
-app-cdr/cdemu-daemon
 app-accessibility/kontrast
-app-cdr/cdemu
-app-cdr/kcdemu
 app-cdr/disc-cover
 app-cdr/xfburn
 app-cdr/dvdisaster
@@ -102,7 +98,6 @@ app-emulation/punes
 app-emulation/protontricks
 app-emulation/softgun
 app-emulation/guestfs-tools
-app-emulation/vendor-reset
 app-emulation/virtualbox
 app-emulation/virtualbox-guest-additions
 app-emulation/virtualbox-extpack-oracle
