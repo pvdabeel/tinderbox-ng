@@ -89,9 +89,11 @@ to overwrite an existing baseline.
 .TP
 .B selftest
 Smoke\-test a freshly bootstrapped baseline: runs
-.B "compare \-\-pretend sys\-apps/portage"
+.B "compare \-\-pretend =sys\-apps/portage\-9999"
 in a fresh session. Override the target via
-.BR TINDERBOX_SELFTEST_TARGET .
+.BR TINDERBOX_SELFTEST_TARGET ,
+or the baseline Portage atom via
+.BR TINDERBOX_BASELINE_PORTAGE_TARGET .
 .TP
 .BR "refresh\-tree " [ "" \fIcommit\fR ]
 Re\-pin
@@ -174,20 +176,27 @@ Re\-apply the shipped portage templates from
 into an existing baseline:
 .IR baseline.make.conf ,
 .IR baseline.repos.conf ,
+.IR baseline.package.use ,
 and
-.IR baseline.package.use
+.IR baseline.package.accept_keywords
 (via
 .IR cp_template ,
 including
 .B @NPROC@
-substitution).
-Idempotent and cheap; does not touch emerged packages,
+substitution), then idempotently re-emerge the live Portage atom when
+.B TINDERBOX_BASELINE_PORTAGE_TARGET
+is set.
+Cheap for templates; the Portage step is a no-op when already installed.
+Does not touch
 .IR kb.qlf ,
 or portage\-ng.
 Use after template updates (notably the
 .B LDFLAGS
 pin that excludes
-.BR \-Wl,\-z,pack\-relative\-relocs )
+.BR \-Wl,\-z,pack\-relative\-relocs ,
+or to pick up
+.B sys\-apps/portage\-9999
+accept_keywords)
 without a full
 .BR TINDERBOX_REBOOTSTRAP=1
 rebuild.
@@ -557,6 +566,7 @@ invokes internally
 Read\-only data: baseline config templates
 .RI ( baseline.make.conf ", "
 .IR baseline.package.use ", "
+.IR baseline.package.accept_keywords ", "
 .IR baseline.repos.conf ", "
 .IR portage-ng-dev.in )
 and the matrix manifests
@@ -689,6 +699,17 @@ Override the package
 .B selftest
 runs through
 .BR compare .
+Defaults to
+.B TINDERBOX_BASELINE_PORTAGE_TARGET
+.TP
+.B TINDERBOX_BASELINE_PORTAGE_TARGET
+Live Portage atom emerged into the baseline during
+.B bootstrap
+and re-applied by
+.BR refresh\-baseline\-config .
+Default
+.IR =sys\-apps/portage\-9999 .
+Set empty to keep the stage3 Portage snapshot and stable selftest target.
 .TP
 .B TINDERBOX_SKIP_DOCTOR
 Set to

@@ -61,7 +61,7 @@ exactly one home, decided by *who runs it and why*.
     `metadata|resolver|merge|test|emptytree` tiers.
 - `share/tinderbox-ng/`: pure data — templates copied into the baseline
   and manifest fixtures. Nothing executable lives here.
-  - `baseline.make.conf`, `baseline.package.use`, `baseline.repos.conf`:
+  - `baseline.make.conf`, `baseline.package.use`, `baseline.package.accept_keywords`, `baseline.repos.conf`:
     `/etc/portage/` config copied into the baseline at bootstrap.
   - `portage-ng-dev.in`: in-chroot launcher template (with `@NPROC@`,
     `@GENTOO_PROFILE@`, `@PORTAGE_NG_ROOT@` token substitution applied

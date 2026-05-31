@@ -42,6 +42,7 @@ tinderbox-ng/
 ├── share/tinderbox-ng/                # Pure data: templates copied into the baseline + fixtures
 │   ├── baseline.make.conf             #   /etc/portage/make.conf for baseline
 │   ├── baseline.package.use           #   /etc/portage/package.use/00-tinderbox-ng-defaults
+│   ├── baseline.package.accept_keywords  #   unmask sys-apps/portage ** for portage-9999
 │   ├── baseline.repos.conf            #   /etc/portage/repos.conf/gentoo.conf
 │   ├── portage-ng-dev.in              #   in-chroot launcher (template)
 │   ├── manifest-100.txt               #   smoke manifest (100 atoms)
@@ -210,7 +211,8 @@ qualified) so any missing host-side tool is reported up front:
     `cp ... /srv/tinderbox-ng/baseline/...`, not a hard barrier.
 13. Optionally runs `tinderbox-ng selftest` (when
     `TINDERBOX_BOOTSTRAP_SELFTEST=1`): a `compare --pretend` of
-    `sys-apps/portage` (overrideable via `TINDERBOX_SELFTEST_TARGET`) in a
+    `=sys-apps/portage-9999` (overrideable via `TINDERBOX_SELFTEST_TARGET` or
+    `TINDERBOX_BASELINE_PORTAGE_TARGET`) in a
     throwaway session. Catches "bootstrap finished cleanly but kb.qlf is
     broken" or "the baseline missed a config flag" regressions in seconds.
 
@@ -900,6 +902,7 @@ ships a particular `kb.qlf`, the resolver disagrees with `emerge`.
 | `TINDERBOX_REBOOTSTRAP` | (unset) | If set, `bootstrap` overwrites an existing baseline. |
 | `TINDERBOX_SKIP_DOCTOR` | (unset) | If set, `bootstrap` skips its preflight doctor pass. |
 | `TINDERBOX_BOOTSTRAP_SELFTEST` | (unset) | If set, `bootstrap` runs `selftest` on completion. |
-| `TINDERBOX_SELFTEST_TARGET` | `sys-apps/portage` | Atom used by `selftest`'s `compare --pretend`. |
+| `TINDERBOX_BASELINE_PORTAGE_TARGET` | `=sys-apps/portage-9999` | Live Portage atom emerged into baseline; empty keeps stage3 Portage. |
+| `TINDERBOX_SELFTEST_TARGET` | `$TINDERBOX_BASELINE_PORTAGE_TARGET` | Atom used by `selftest`'s `compare --pretend`. |
 | `TINDERBOX_MIN_FREE_MIB` | `30000` | Disk-space floor (MiB) `doctor` checks under `dirname $TINDERBOX_ROOT`. |
 | `TINDERBOX_MDNS_HOSTS` | `mac-pro.local imac-pro.local` | mDNS hostnames `doctor` resolves and `_inject_mdns_hosts` writes into each session's `/etc/hosts`. |

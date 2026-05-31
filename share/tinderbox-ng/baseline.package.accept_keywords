@@ -1,0 +1,12 @@
+# /etc/portage/package.accept_keywords/00-tinderbox-ng-defaults -- shipped
+# by tinderbox-ng bootstrap.
+#
+# Per-package keyword overrides applied to every session inheriting from
+# the baseline. Sessions can layer additional overrides on top via their
+# overlayfs upper layer.
+#
+# sys-apps/portage-9999 is a live (**-only) ebuild. ~amd64 in make.conf
+# does not expose it; ** here lets both emerge and portage-ng plan/build
+# the live Portage tree during compare runs and keeps the baseline emerge
+# backend aligned with upstream HEAD (see bootstrap_upgrade_portage).
+sys-apps/portage **

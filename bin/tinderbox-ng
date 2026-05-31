@@ -146,6 +146,11 @@ TINDERBOX_SESSIONS_TMPFS_SIZE="${TINDERBOX_SESSIONS_TMPFS_SIZE:-auto}"
 # this only consumes disk; ccache compresses and only fills lazily.
 TINDERBOX_CCACHE_MAX_SIZE="${TINDERBOX_CCACHE_MAX_SIZE:-100G}"
 
+# Live Portage ebuild emerged into the baseline after bootstrap templates
+# and dev-vcs/git are in place. Both emerge-side compares and selftest use
+# this atom by default. Set empty to keep the stage3 Portage snapshot.
+TINDERBOX_BASELINE_PORTAGE_TARGET="${TINDERBOX_BASELINE_PORTAGE_TARGET:-=sys-apps/portage-9999}"
+
 # =============================================================================
 # Logging helpers
 # =============================================================================
@@ -222,6 +227,7 @@ TINDERBOX_OPTIONAL_BINS=(
 TINDERBOX_REQUIRED_TEMPLATES=(
   baseline.make.conf
   baseline.package.use
+  baseline.package.accept_keywords
   baseline.repos.conf
   portage-ng-dev.in
   manifest-100.txt
@@ -927,7 +933,7 @@ cmd_selftest() {
   require_root
   require_dirs
 
-  local target="${TINDERBOX_SELFTEST_TARGET:-sys-apps/portage}"
+  local target="${TINDERBOX_SELFTEST_TARGET:-${TINDERBOX_BASELINE_PORTAGE_TARGET:-sys-apps/portage}}"
   local label="selftest-$$"
 
   log_info "selftest: compare --pretend $target (label=$label)"
@@ -975,6 +981,7 @@ cmd_bootstrap() {
   bootstrap_pin_tree
   bootstrap_post_stage3
   bootstrap_install_swipl
+  bootstrap_upgrade_portage
   bootstrap_install_ccache
   bootstrap_install_kernel_sources
   bootstrap_install_portage_ng
@@ -985,7 +992,7 @@ cmd_bootstrap() {
     log_info "running post-bootstrap selftest (TINDERBOX_BOOTSTRAP_SELFTEST set)"
     cmd_selftest || log_warn "selftest reported issues; inspect logs above"
   else
-    log_info "next: tinderbox-ng selftest    # smoke-test compare on sys-apps/portage"
+    log_info "next: tinderbox-ng selftest    # smoke-test compare on ${TINDERBOX_BASELINE_PORTAGE_TARGET:-sys-apps/portage}"
     log_info "      tinderbox-ng new <name> && tinderbox-ng enter <name>"
   fi
 }
@@ -1217,10 +1224,39 @@ bootstrap_pin_tree() {
 _bootstrap_apply_portage_templates() {
   install -d "$BASELINE_DIR/etc/portage/repos.conf"
   install -d "$BASELINE_DIR/etc/portage/package.use"
+  install -d "$BASELINE_DIR/etc/portage/package.accept_keywords"
   cp_template baseline.repos.conf "$BASELINE_DIR/etc/portage/repos.conf/gentoo.conf"
   cp_template baseline.make.conf  "$BASELINE_DIR/etc/portage/make.conf"
   cp_template baseline.package.use "$BASELINE_DIR/etc/portage/package.use/00-tinderbox-ng-defaults"
+  cp_template baseline.package.accept_keywords \
+      "$BASELINE_DIR/etc/portage/package.accept_keywords/00-tinderbox-ng-defaults"
   _baseline_sync_ccache_feature
+}
+
+# Emerge the live Portage ebuild into the baseline so emerge-side compares
+# run against the same upstream Portage the tree tracks, not the stage3
+# snapshot. Requires dev-vcs/git (bootstrap_install_swipl) and
+# baseline.package.accept_keywords unmasking sys-apps/portage **.
+# Idempotent: re-emerging an already-installed =9999 is a no-op.
+bootstrap_upgrade_portage() {
+  local target="$TINDERBOX_BASELINE_PORTAGE_TARGET"
+  [[ -n "$target" ]] || {
+    log_info "bootstrap_upgrade_portage: skipped (TINDERBOX_BASELINE_PORTAGE_TARGET empty)"
+    return 0
+  }
+
+  log_info "emerge $target into baseline (live Portage for emerge-side compares)"
+  # git-r3 live ebuilds unpack under $DISTFILES_DIR/git3-src/ as the portage
+  # user (FEATURES=userpriv). Older matrix runs left that directory root:root
+  # 0755, which makes mkdir fail with EPERM during bootstrap_upgrade_portage.
+  install -d -m 2775 -o 250 -g 250 "$DISTFILES_DIR/git3-src"
+  in_baseline_chroot bash -e <<EOF
+. /etc/profile
+emerge --quiet-build=y --jobs="\$(nproc)" --load-average="\$(nproc)" \
+       --keep-going=y --oneshot $target
+emerge --info sys-apps/portage | head -n 3
+EOF
+  log_ok "baseline Portage upgraded to $target"
 }
 
 # Toggle FEATURES=ccache in the baseline make.conf to match whether
@@ -1954,10 +1990,11 @@ cmd_baseline_thaw() {
 # =============================================================================
 #
 # Re-apply the shipped /etc/portage templates (make.conf, repos.conf,
-# package.use defaults) from share/tinderbox-ng/ into the existing baseline.
-# Idempotent and cheap (~instant). Does not touch emerged packages, kb.qlf,
-# or portage-ng — only the three template files bootstrap copies at
-# bootstrap_post_stage3 time.
+# package.use / package.accept_keywords defaults) from share/tinderbox-ng/
+# into the existing baseline, then idempotently re-emerge the live Portage
+# atom when TINDERBOX_BASELINE_PORTAGE_TARGET is set. Cheap for templates;
+# the Portage step is a no-op when already installed. Does not touch kb.qlf
+# or portage-ng.
 #
 # Use when share/tinderbox-ng/baseline.make.conf gains a new pin (e.g.
 # LDFLAGS without pack-relative-relocs) and you want existing baselines to
@@ -1980,6 +2017,8 @@ cmd_refresh_baseline_config() {
   log_info "  $BASELINE_DIR/etc/portage/make.conf"
   log_info "  $BASELINE_DIR/etc/portage/repos.conf/gentoo.conf"
   log_info "  $BASELINE_DIR/etc/portage/package.use/00-tinderbox-ng-defaults"
+  log_info "  $BASELINE_DIR/etc/portage/package.accept_keywords/00-tinderbox-ng-defaults"
+  bootstrap_upgrade_portage
   log_info "new compare sessions inherit the update via the baseline lower layer"
 }
 
@@ -4563,8 +4602,10 @@ Subcommands:
                            Set TINDERBOX_BOOTSTRAP_SELFTEST=1 to also run
                            `selftest` on completion.
   selftest                 Smoke-test a freshly-bootstrapped baseline:
-                           `compare --pretend sys-apps/portage` in a fresh
-                           session. Override target via TINDERBOX_SELFTEST_TARGET.
+                           `compare --pretend` of the live Portage atom
+                           (default =sys-apps/portage-9999) in a fresh session.
+                           Override via TINDERBOX_SELFTEST_TARGET or
+                           TINDERBOX_BASELINE_PORTAGE_TARGET.
   refresh-tree [<commit>]  Re-pin shared/portage-tree to <commit> (default: master).
                            Existing sessions keep the old tree until reset.
   refresh-kb               Regenerate kb.qlf inside baseline against the pinned
@@ -4586,9 +4627,11 @@ Subcommands:
                            cheap (~1s for a 70k-file stage3). `tinderbox-ng
                            doctor` warns when this is needed.
   refresh-baseline-config  Re-apply share/tinderbox-ng portage templates
-                           (make.conf, repos.conf, package.use) into an existing
-                           baseline. Picks up template fixes (e.g. LDFLAGS pin)
-                           without TINDERBOX_REBOOTSTRAP=1. Idempotent.
+                           (make.conf, repos.conf, package.use,
+                           package.accept_keywords) into an existing baseline,
+                           then idempotently re-emerge the live Portage atom
+                           when TINDERBOX_BASELINE_PORTAGE_TARGET is set.
+                           Picks up template fixes without TINDERBOX_REBOOTSTRAP=1.
 
   new <name>               Create an empty session.
   enter <name>             Mount overlay + binds and chroot in (interactive).
