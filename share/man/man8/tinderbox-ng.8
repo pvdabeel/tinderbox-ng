@@ -789,11 +789,17 @@ from
 .B PORTAGE_NG_LOCAL
 Local
 .B portage\-ng
-checkout to seed (e.g.
+checkout on the host (default
+.IR /usr/local/share/portage-ng ,
+same as AWS
+.BR PORTAGE_NG_CLONE ).
+Seeds
+.IR baseline/opt/portage-ng
+(in\-chroot
 .IR /opt/portage-ng ).
-Auto\-detected from the conventional paths
+Auto\-detected from
+.BR PORTAGE_NG_CLONE ,
 .IR /root/prolog ,
-.IR /opt/portage-ng ,
 .I /opt/prolog
 when unset.
 .TP

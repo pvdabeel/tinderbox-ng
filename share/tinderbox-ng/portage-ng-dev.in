@@ -6,8 +6,8 @@
 # inside the baseline. Mirrors the macOS dev alias from CONTRIBUTING.md so
 # in-chroot invocations match what you'd type on a developer workstation.
 #
-# @PORTAGE_NG_ROOT@ is substituted by the bootstrap step (defaults to
-# /opt/portage-ng).
+# @PORTAGE_NG_ROOT@ is substituted by bootstrap (default /opt/portage-ng
+# inside the baseline chroot; host source is /usr/local/share/portage-ng).
 
 set -eu
 

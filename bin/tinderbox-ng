@@ -53,10 +53,9 @@ PORTAGE_TREE_PIN="${PORTAGE_TREE_PIN:-}"
 # the script rsyncs from PORTAGE_NG_LOCAL into the baseline. Since
 # tinderbox-ng now lives in its own repository, there is no in-tree
 # auto-detection: PORTAGE_NG_URL or PORTAGE_NG_LOCAL must be set
-# explicitly, or one of the conventional deploy paths
-# (/root/prolog, /opt/portage-ng, /opt/prolog) must already exist on the
-# host. doctor surfaces a missing setting as an error before bootstrap
-# touches anything.
+# explicitly, or PORTAGE_NG_CLONE (/usr/local/share/portage-ng, same as
+# contrib/ami-tinder.sh) or a legacy path must exist on the host. doctor
+# surfaces a missing setting as an error before bootstrap touches anything.
 SCRIPT_PATH="$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 
@@ -66,11 +65,15 @@ _pn_is_repo() {
   [[ -f "$1/portage-ng.pl" ]] || [[ -f "$1/Source/loader.pl" ]]
 }
 
+# Host-side portage-ng git checkout (mirrors contrib/ami-tinder.sh PORTAGE_NG_CLONE).
+PORTAGE_NG_CLONE="${PORTAGE_NG_CLONE:-/usr/local/share/portage-ng}"
+
 _pn_autodetect() {
-  local cand
-  for cand in /root/prolog /opt/portage-ng /opt/prolog; do
-    if _pn_is_repo "$cand"; then printf '%s' "$cand"; return; fi
-  done
+  # Same single host path as contrib/ami-tinder.sh (no /opt/portage-ng on host).
+  if _pn_is_repo "$PORTAGE_NG_CLONE"; then
+    printf '%s' "$PORTAGE_NG_CLONE"
+    return
+  fi
   printf ''
 }
 
@@ -753,7 +756,7 @@ cmd_doctor() {
   else
     log_error "no portage-ng source found"
     log_error "  tried: \$PORTAGE_NG_LOCAL=${PORTAGE_NG_LOCAL:-(unset)}, plus auto-detect of"
-    log_error "  /root/prolog, /opt/portage-ng, /opt/prolog and the script's parent tree."
+    log_error "  \$PORTAGE_NG_CLONE=${PORTAGE_NG_CLONE} (run contrib/deploy-host.sh to git-clone it)."
     log_error "  Set PORTAGE_NG_LOCAL=/path/to/portage-ng (must contain portage-ng.pl"
     log_error "  at the root or Source/loader.pl) or PORTAGE_NG_URL=https://... PORTAGE_NG_REF=<ref>."
     fail=$((fail+1))
@@ -4761,7 +4764,8 @@ Environment:
   PORTAGE_TREE_URL                Default https://github.com/gentoo-mirror/gentoo.git
   PORTAGE_TREE_PIN                Optional commit to pin during bootstrap.
   PORTAGE_NG_URL                  If set: git clone. Otherwise rsync PORTAGE_NG_LOCAL.
-  PORTAGE_NG_LOCAL                Local portage-ng checkout to seed (e.g. /opt/portage-ng).
+  PORTAGE_NG_LOCAL                Host checkout to seed baseline (default: /usr/local/share/portage-ng).
+  PORTAGE_NG_CLONE                Same default path as ami-tinder.sh (override if needed).
   TINDERBOX_REBOOTSTRAP=1         Allow `bootstrap` to overwrite an existing baseline.
 
 See README.md in this repository for deployment notes.

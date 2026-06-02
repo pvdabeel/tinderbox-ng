@@ -99,23 +99,31 @@ stage3 download.
 ### Recommended: `contrib/deploy-host.sh` (one-shot)
 
 ```sh
-# From your dev machine - first-time install on a fresh VM (long: ~hours):
+# From your dev machine - install or update a VM from GitHub (default):
+contrib/deploy-host.sh root@vm-linux.local
+
+# First-time install on a fresh VM (long: ~hours):
 TINDERBOX_BOOTSTRAP_SELFTEST=1 \
   contrib/deploy-host.sh --bootstrap root@vm-linux.local
 
-# After `git pull` on the dev machine - refresh script + templates only:
-contrib/deploy-host.sh root@vm-linux.local
-
-# Refresh script + templates AND push your latest portage-ng src into the
-# already-bootstrapped baseline (does NOT regenerate kb.qlf):
+# Push portage-ng into an existing baseline (does NOT regenerate kb.qlf):
 contrib/deploy-host.sh --refresh-portage-ng root@vm-linux.local
+
+# Rsync uncommitted tinderbox-ng work from this laptop instead of git:
+contrib/deploy-host.sh --from-local root@vm-linux.local
 ```
 
 `deploy-host.sh` performs, in order:
 
-1. `rsync` of `bin/`, `libexec/` and `share/` (excludes `.git/`,
-   `reports/`, `contrib/`) to `/usr/local/share/tinderbox-ng/` on the
-   remote.
+1. **Default (git):** `git clone` / `git fetch` of
+   [tinderbox-ng](https://github.com/pvdabeel/tinderbox-ng) into
+   `/usr/local/share/tinderbox-ng/` and
+   [portage-ng](https://github.com/pvdabeel/portage-ng) into
+   `/usr/local/share/portage-ng/` (same layout as `contrib/ami-tinder.sh`
+   on AWS). No host `/opt/portage-ng` — that path is only inside the
+   baseline chroot after bootstrap. **`--from-local`:** `rsync` of `bin/`, `libexec/`
+   and `share/` from this dev checkout instead (excludes `.git/`,
+   `reports/`, `contrib/`).
 2. Symlink `/usr/local/sbin/tinderbox-ng` →
    `/usr/local/share/tinderbox-ng/bin/tinderbox-ng`, plus
    `/usr/local/share/man/man8/tinderbox-ng.8` →
@@ -127,11 +135,11 @@ contrib/deploy-host.sh --refresh-portage-ng root@vm-linux.local
 5. Optional: `tinderbox-ng selftest` (with `--selftest` or
    `TINDERBOX_BOOTSTRAP_SELFTEST=1` during a `--bootstrap` run).
 
-Forwarded environment: `TINDERBOX_CCACHE_MAX_SIZE`,
-`TINDERBOX_SESSIONS_TMPFS_SIZE`, `TINDERBOX_REBOOTSTRAP`, `STAGE3_VARIANT`,
-`STAGE3_ARCH`, `PORTAGE_TREE_PIN`, `GENTOO_PROFILE`,
-`PORTAGE_NG_URL`, `PORTAGE_NG_LOCAL`, `PORTAGE_NG_REF`, etc. — see
-`contrib/deploy-host.sh --help` for the full list.
+Forwarded environment: `TINDERBOX_NG_URL`, `TINDERBOX_NG_REF`,
+`PORTAGE_NG_URL`, `PORTAGE_NG_REF` (git mode sets `PORTAGE_NG_LOCAL` to
+`/usr/local/share/portage-ng` automatically), plus
+`TINDERBOX_CCACHE_MAX_SIZE`, `STAGE3_*`, `GENTOO_PROFILE`, etc. — see
+`contrib/deploy-host.sh --help`.
 
 ### Manual install (equivalent steps)
 
@@ -192,12 +200,13 @@ qualified) so any missing host-side tool is reported up front:
    shared cache is writable by Portage's `userfetch`/`usersandbox` user.
    Stage3 does not include ccache; without this step the
    `FEATURES="ccache"` bit is silently inert.
-9. Installs `portage-ng` into `/opt/portage-ng` from
-   `$PORTAGE_NG_LOCAL` (rsync) or `$PORTAGE_NG_URL` (git clone).
-   At least one of the two must be set, or one of the conventional deploy
-   paths (`/root/prolog`, `/opt/portage-ng`, `/opt/prolog`) must already
-   exist on the host. `doctor` reports a missing setting as a hard error
-   before anything is downloaded.
+9. Rsyncs `portage-ng` from the host checkout (`$PORTAGE_NG_LOCAL`,
+   default `$PORTAGE_NG_CLONE` = `/usr/local/share/portage-ng`) into
+   `baseline/opt/portage-ng` (in-chroot path `/opt/portage-ng`). Host
+   bootstrap does not git-clone into the baseline; use `deploy-host.sh`
+   (git) or set `PORTAGE_NG_URL` only if you intentionally want in-baseline
+   clone. `doctor` requires a host checkout at `PORTAGE_NG_CLONE` or
+   `PORTAGE_NG_LOCAL` before download.
 10. Installs the in-chroot `portage-ng-dev` launcher at
    `/usr/local/bin/portage-ng-dev` and `tinderbox-matrix` runner at
    `/usr/local/bin/tinderbox-matrix`.
@@ -904,7 +913,8 @@ ships a particular `kb.qlf`, the resolver disagrees with `emerge`.
 | `PORTAGE_TREE_URL` | `https://github.com/gentoo-mirror/gentoo.git` | Tree source. |
 | `PORTAGE_TREE_PIN` | (latest) | Pin to a specific commit at bootstrap. |
 | `PORTAGE_NG_URL` | (unset) | If set: `git clone`; else rsync from `PORTAGE_NG_LOCAL`. |
-| `PORTAGE_NG_LOCAL` | one of `/root/prolog`, `/opt/portage-ng`, `/opt/prolog` if it looks like a portage-ng checkout, else unset | Local portage-ng checkout to seed `/opt/portage-ng`. Bootstrap fails if neither this nor `PORTAGE_NG_URL` resolves. |
+| `PORTAGE_NG_LOCAL` | `$PORTAGE_NG_CLONE` (`/usr/local/share/portage-ng`), else `/root/prolog`, `/opt/prolog` | Host portage-ng checkout; seeds `baseline/opt/portage-ng`. Same as AWS `PORTAGE_NG_CLONE`. |
+| `PORTAGE_NG_CLONE` | `/usr/local/share/portage-ng` | Default host git checkout path (`contrib/ami-tinder.sh`). |
 | `PORTAGE_NG_REF` | `HEAD` | Ref to check out (only if `PORTAGE_NG_URL` set). Pin to `8deb4131` (or later) for a known-good portage-ng with binpkg refresh + VDB-reconciliation backstop landed. |
 | `GENTOO_PROFILE` | `default/linux/amd64/23.0/split-usr/no-multilib` | Must match `config:gentoo_profile/1`. |
 | `GENTOO_LOCALE` | `en_US.UTF-8 UTF-8` | Appended to `/etc/locale.gen`. |
