@@ -47,7 +47,8 @@ tinderbox-ng/
 │   ├── portage-ng-dev.in              #   in-chroot launcher (template)
 │   ├── manifest-100.txt               #   smoke manifest (100 atoms)
 │   ├── manifest-1000.txt              #   release-comparison manifest (1000 atoms)
-│   └── manifest-all.txt               #   every cat/pn in the pinned tree (~19k atoms)
+│   ├── manifest-all.txt               #   legacy tree-scanned cat/pn list (~19k atoms)
+│   └── manifest-all-packages.txt      #   kb-derived cat/pn list (regenerate via gen-manifest-from-kb.py)
 │
 ├── share/man/man8/
 │   └── tinderbox-ng.8                 # manpage (→ /usr/local/share/man/man8/)
@@ -499,13 +500,24 @@ manifest of atoms (one `cat/pn` per line; `#` comments OK) and writes a
 `results.tsv` plus per-package compare logdirs as it goes. The shipped
 manifests live in `share/tinderbox-ng/`:
 
-| Manifest             | Atoms  | Use case                                      |
-|----------------------|-------:|-----------------------------------------------|
-| `manifest-100.txt`   |    100 | Curated smoke set, ~hour at `--build`.        |
-| `manifest-1000.txt`  |   1000 | Standard release-comparison run, ~a day.      |
-| `manifest-all.txt`   |  19243 | Every `cat/pn` in the pinned tree (regenerated; days at `--build`). |
+| Manifest                    | Atoms  | Use case                                      |
+|-----------------------------|-------:|-----------------------------------------------|
+| `manifest-100.txt`          |    100 | Curated smoke set, ~hour at `--build`.        |
+| `manifest-1000.txt`         |   1000 | Standard release-comparison run, ~a day.      |
+| `manifest-all.txt`          |  19243 | Legacy tree-scanned cat/pn list.              |
+| `manifest-all-packages.txt` |  19285 | **Preferred** kb-derived cat/pn list (matches `kb.qlf`). |
 
-A full `--build` sweep over `manifest-all.txt` takes days, so
+Regenerate `manifest-all-packages.txt` after `refresh-kb` (or any kb
+rebuild) so the manifest tracks exactly what portage-ng loaded:
+
+```sh
+# on the VM (after refresh-kb):
+python3 contrib/gen-manifest-from-kb.py \\
+  --kb /srv/tinderbox-ng/baseline/opt/portage-ng/Knowledge/kb.raw \\
+  --out share/tinderbox-ng/manifest-all-packages.txt
+```
+
+A full `--build` sweep over `manifest-all-packages.txt` takes days, so
 **the preferred way to launch one is inside a detached `screen`
 session**. That keeps a live driver TTY you can reattach to after an
 SSH drop, unlike `nohup setsid` (or the equivalent `tinderbox-ng
@@ -515,7 +527,7 @@ continue --background`) which detaches into a pure daemon with no TTY:
 # Kick off a fresh matrix detached, from your dev machine:
 ssh root@vm-linux.local 'screen -dmS tinderbox-ng \
     compare-matrix --build --jobs 16 \
-    --manifest /usr/local/share/tinderbox-ng/share/tinderbox-ng/manifest-all.txt'
+    --manifest /usr/local/share/tinderbox-ng/share/tinderbox-ng/manifest-all-packages.txt'
 
 # Reattach the live driver TTY:
 ssh -t root@vm-linux.local screen -r tinderbox-ng
