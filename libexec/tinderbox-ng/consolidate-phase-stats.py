@@ -53,6 +53,32 @@ Aggregators (choose with --aggregator):
   p75     75th percentile  (slightly pessimistic forecast).
   p90     90th percentile  (very pessimistic forecast).
 
+Completed-build filter (--require-phase, default: merge):
+  Within each per-session file, an entry's facts are ingested only when
+  that same file also holds a fact for the required phase (default
+  `merge`) for that entry. This guards against three distortion sources
+  observed in full-tree build runs:
+
+    1. Failure-truncated observations: portage-ng's
+       ebuild_exec:record_phase_stats/4 records a phase's duration even
+       when the phase FAILED, so an aborted gcc compile leaves a
+       seconds-long `compile` fact that would poison the forecast. A
+       failed build never reaches `merge`, so requiring a same-session
+       merge fact drops every truncated observation.
+    2. Baseline-seed carry-over: sessions start from a baseline whose
+       Knowledge/phase_stats.pl may be pre-seeded; load_phase_stats
+       re-saves those facts verbatim into every session file,
+       multiplying foreign observations by the session count. Seed
+       entries were never built in-session, so they have no in-session
+       merge fact and are dropped (unless genuinely rebuilt, in which
+       case the fresh observations rightly win).
+    3. Binpkg deploys: these are structurally absent (the binpkg
+       qmerge fast-path bypasses phase recording entirely), but the
+       filter also guarantees nothing binpkg-shaped can ever slip in:
+       a deploy records no phases at all, let alone `merge`.
+
+  Use `--require-phase none` to disable and ingest everything.
+
 A `%!` comment header records aggregator, source-file count, and per-entry
 observation counts so the file is self-describing without breaking Prolog
 parsers (`%!` lines are pure comments).
@@ -117,6 +143,39 @@ def parse_phase_stats_file(path: Path) -> Iterator[Tuple[str, str, str, float]]:
                     yield ("seconds", m.group(1), m.group(2), float(m.group(3)))
     except OSError as e:
         print(f"warning: cannot read {path}: {e}", file=sys.stderr)
+
+
+def ingest_file(
+    path: Path,
+    require_phase: str,
+    bytes_obs: Dict[Tuple[str, str], List[float]],
+    secs_obs: Dict[Tuple[str, str], List[float]],
+) -> Tuple[int, int]:
+    """Parse one per-session file and fold its facts into the global
+    observation maps, honouring the completed-build filter.
+
+    When `require_phase` is non-empty, an entry's facts are kept only if
+    the SAME file holds at least one fact (bytes or seconds) for that
+    entry at `require_phase`. Returns (kept_facts, dropped_facts).
+    """
+    facts = list(parse_phase_stats_file(path))
+    if require_phase:
+        eligible = {entry for (_k, entry, phase, _v) in facts
+                    if phase == require_phase}
+    else:
+        eligible = None
+
+    kept = dropped = 0
+    for kind, entry, phase, val in facts:
+        if eligible is not None and entry not in eligible:
+            dropped += 1
+            continue
+        if kind == "bytes":
+            bytes_obs[(entry, phase)].append(val)
+        else:
+            secs_obs[(entry, phase)].append(val)
+        kept += 1
+    return kept, dropped
 
 
 def find_phase_stats_files(src: Path, excludes: List[str]) -> List[Path]:
@@ -206,6 +265,7 @@ def write_master(
     aggregator_name: str,
     min_obs: int,
     n_sources: int,
+    require_phase: str = "",
 ) -> Tuple[int, int, int]:
     """Aggregate observations and write the master file. Returns
     (entry_count, bytes_facts, seconds_facts)."""
@@ -224,6 +284,7 @@ def write_master(
         f.write(f"%!   source_files   : {n_sources}\n")
         f.write(f"%!   entries        : {len(entries)}\n")
         f.write(f"%!   min_observations: {min_obs}\n")
+        f.write(f"%!   require_phase  : {require_phase or '(none)'}\n")
         f.write("%!\n")
         f.write("%! Format matches portage-ng's ebuild_exec:save_phase_stats/0.\n")
         f.write("%! Drop in as Knowledge/phase_stats.pl to seed forecasting tables.\n")
@@ -282,6 +343,13 @@ def main(argv: List[str]) -> int:
     p.add_argument("--min-observations", type=int, default=1, metavar="N",
                    help="Drop (Entry, Phase) buckets with fewer than N "
                         "observations (default: 1, keep singletons).")
+    p.add_argument("--require-phase", default="merge", metavar="PHASE",
+                   help="Per session file, ingest an entry's facts only when "
+                        "that file also holds a fact for PHASE for the same "
+                        "entry (default: merge -- keeps only completed source "
+                        "builds; excludes failure-truncated observations, "
+                        "baseline-seed carry-over, and binpkg deploys). "
+                        "Use 'none' to disable.")
     p.add_argument("--exclude-glob", action="append", default=[], metavar="PATTERN",
                    help="fnmatch pattern (matched against absolute path) to "
                         "skip during the input scan. Repeatable.")
@@ -307,15 +375,21 @@ def main(argv: List[str]) -> int:
         print(f"[phase-stats] scanning {len(sources)} source file(s) under {src}",
               file=sys.stderr)
 
+    require_phase = "" if args.require_phase == "none" else args.require_phase
+
     bytes_obs: Dict[Tuple[str, str], List[float]] = defaultdict(list)
     secs_obs:  Dict[Tuple[str, str], List[float]] = defaultdict(list)
 
+    total_kept = total_dropped = 0
     for sf in sources:
-        for kind, entry, phase, val in parse_phase_stats_file(sf):
-            if kind == "bytes":
-                bytes_obs[(entry, phase)].append(val)
-            else:
-                secs_obs[(entry, phase)].append(val)
+        kept, dropped = ingest_file(sf, require_phase, bytes_obs, secs_obs)
+        total_kept += kept
+        total_dropped += dropped
+
+    if not args.quiet and require_phase:
+        print(f"[phase-stats] require-phase={require_phase}: "
+              f"kept {total_kept} fact(s), dropped {total_dropped}",
+              file=sys.stderr)
 
     if not bytes_obs and not secs_obs:
         print("error: no parsable facts in any source file", file=sys.stderr)
@@ -328,6 +402,7 @@ def main(argv: List[str]) -> int:
         aggregator_name=args.aggregator,
         min_obs=args.min_observations,
         n_sources=len(sources),
+        require_phase=require_phase,
     )
 
     if not args.quiet:

@@ -4149,6 +4149,10 @@ _analyze_link_pair() {
 # Aggregation:
 #   --aggregator NAME       median (default) | mean | max | p75 | p90.
 #   --min-observations N    drop buckets with fewer than N samples.
+#   --require-phase PHASE   per session file, only ingest entries that also
+#                           hold a PHASE fact in that file (default: merge;
+#                           filters failed builds, seed carry-over, and
+#                           binpkg deploys -- which record no phases at all).
 #
 # Pass-through:
 #   --exclude-glob PATTERN  fnmatch pattern (matched against absolute path)
@@ -4158,7 +4162,7 @@ cmd_phase_stats() {
   require_dirs
 
   local pinned_run="" alt_logdir="" alt_src="" out_path=""
-  local aggregator="" min_obs=""
+  local aggregator="" min_obs="" require_phase=""
   local -a excludes=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -4174,6 +4178,8 @@ cmd_phase_stats() {
       --aggregator=*)     aggregator="${1#--aggregator=}"; shift ;;
       --min-observations) min_obs="$2"; shift 2 ;;
       --min-observations=*) min_obs="${1#--min-observations=}"; shift ;;
+      --require-phase)    require_phase="$2"; shift 2 ;;
+      --require-phase=*)  require_phase="${1#--require-phase=}"; shift ;;
       --exclude-glob)     excludes+=("$2"); shift 2 ;;
       --exclude-glob=*)   excludes+=("${1#--exclude-glob=}"); shift ;;
       -h|--help)
@@ -4181,6 +4187,7 @@ cmd_phase_stats() {
 tinderbox-ng phase-stats [--run DIR | --logdir DIR | --src DIR] [--out FILE]
                          [--aggregator median|mean|max|p75|p90]
                          [--min-observations N]
+                         [--require-phase PHASE|none]
                          [--exclude-glob PATTERN ...]
 
 Consolidate the per-session phase_stats.pl files that `tinderbox-ng
@@ -4214,6 +4221,13 @@ Aggregation:
   --min-observations N
                    Drop (Entry, Phase) buckets with fewer than N
                    observations (default: 1, keep singletons).
+  --require-phase PHASE
+                   Per session file, ingest an entry's facts only when
+                   that file also holds a fact for PHASE for the same
+                   entry. Default: merge -- keeps only completed source
+                   builds, which drops failure-truncated phase times,
+                   baseline-seed carry-over, and (belt-and-braces)
+                   anything binpkg-deploy shaped. 'none' disables.
 
 Other:
   --exclude-glob PATTERN
@@ -4292,8 +4306,9 @@ PHASE_STATS_HELP
   fi
 
   local args=("$consolidator" --src "$source_dir" --out "$out_path")
-  [[ -n "$aggregator" ]] && args+=(--aggregator "$aggregator")
-  [[ -n "$min_obs"    ]] && args+=(--min-observations "$min_obs")
+  [[ -n "$aggregator"    ]] && args+=(--aggregator "$aggregator")
+  [[ -n "$min_obs"       ]] && args+=(--min-observations "$min_obs")
+  [[ -n "$require_phase" ]] && args+=(--require-phase "$require_phase")
   local pat
   for pat in "${excludes[@]}"; do
     args+=(--exclude-glob "$pat")
