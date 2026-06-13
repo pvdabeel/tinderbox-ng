@@ -381,20 +381,28 @@ combination of them in the cases tinderbox-ng exercises:
 
 ### Exit-code triage
 
-```
-0 = no assumptions
-1 = only prover cycle-break assumptions
-2 = at least one domain assumption (e.g. masked dep)
-3 = invalid targets (no resolvable atom passed)
-* = crash (anything else)
-```
+portage-ng's `Source/Application/Interface/exitcodes.pl` is the source of
+truth for numeric exit codes. `libexec/tinderbox-ng/portage-ng-exit-label.py`
+reads that table at compare time (from the baseline copy under
+`/opt/portage-ng/`) and maps codes to the labels written into `results.tsv`:
 
-`compare-matrix.sh` and `_compare_summarize` interpret 0/1/2 as
-"plan produced", 3+ as failure. In particular, `Source/Application/Interface/Action/build.pl`
-in `portage-ng` deliberately returns `halt(3)` on invalid-target failures
-specifically so this triage is unambiguous; if you change exit-code
-semantics in `portage-ng` without updating tinderbox-ng, every compare
-result silently misclassifies.
+| Code | Label | Meaning |
+|------|-------|---------|
+| 0 | `OK` | Clean plan (no assumptions) |
+| 1 | `OK(cycles)` | Plan with prover cycle-break assumptions only |
+| 2 | `OK(assumed)` | Plan with ≥1 domain assumption (e.g. masked dep) |
+| 3 | `EXEC(failed)` or `TARGET(invalid)` | Build step failed, or no resolvable target (log-heuristic disambiguation) |
+| 1 (no plan footer) | `CLI(error)` | Interface catch-all / CLI failure misreported as rc 1 |
+| other | `CRASH(N)` | Unexpected non-zero exit |
+| 124 / 137 / 143 | `TIMEOUT` / `KILLED(...)` | watchdog / signal |
+
+Log-based reclassifiers in `_compare_summarize` may further override labels
+(e.g. `RESTRICT(fetch)`, `INFRA(overlay-inode-flicker)`).
+
+`compare-matrix.sh` and `_compare_summarize` treat any label matching
+`OK` or `OK(...)` as "plan produced". If you add codes to `exitcodes.pl`
+in portage-ng, extend `NAME_LABEL` in `portage-ng-exit-label.py` (or rely
+on the generic `name_to_label()` fallback) so matrix output stays readable.
 
 ### Output formats
 

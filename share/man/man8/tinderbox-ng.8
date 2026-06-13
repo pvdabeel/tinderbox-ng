@@ -288,6 +288,16 @@ column carries one of:
 (rc 137, almost always OOM in the matrix),
 .B KILLED(SIGTERM)
 (rc 143),
+.B EXEC(failed)
+(build step failed, portage\-ng rc 3),
+.B TARGET(invalid)
+(no resolvable target, portage\-ng rc 3),
+.B CLI(error)
+(interface/CLI failure without a plan footer),
+.B CRASH( N )
+(unexpected non\-zero exit not in portage\-ng's
+.IR exitcodes.pl
+table),
 .B RESTRICT(fetch)
 (ebuild needs a manual download),
 .B INFRA(overlay\-inode\-flicker)
@@ -296,10 +306,14 @@ column carries one of:
 during unpack \(em a documented OverlayFS bug under inode\-cache reclaim
 pressure; mostly mitigated by the per\-session
 .I /var/tmp/portage
-bind\-mount, but residual occurrences are tagged this way for accounting),
-or
+bind\-mount, but residual occurrences are tagged this way for accounting).
+Labels are resolved by
+.BI libexec/tinderbox-ng/portage-ng-exit-label.py
+(reading the baseline copy of portage-ng's
+.IR Source/Application/Interface/exitcodes.pl ).
+Emerge failures remain
 .BI FAIL( N )
-for any other non\-zero exit code.
+for non\-zero exit codes.
 The plan and build passes have separate timeouts \(em see
 .B TINDERBOX_PLAN_TIMEOUT
 and

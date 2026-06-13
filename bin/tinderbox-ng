@@ -246,6 +246,7 @@ TINDERBOX_REQUIRED_HELPERS=(
   compare-merge-emerge.py
   consolidate-phase-stats.py
   extract-timing.py
+  portage-ng-exit-label.py
 )
 
 # Minimum disk-space hints (in MiB) for $TINDERBOX_ROOT before bootstrap.
@@ -2683,6 +2684,69 @@ cmd_compare() {
 # pass succeeded). Counters that describe the plan come from the plan
 # log; counters that describe execution come from the build log.
 #
+# Resolve portage-ng's exitcodes.pl from the baseline (override via
+# TINDERBOX_PN_EXITCODES). Keeps tinderbox-ng labels in sync with the
+# interface:exit_code/3 table in portage-ng without hard-coding every code.
+_pn_exitcodes_pl() {
+  if [[ -n "${TINDERBOX_PN_EXITCODES:-}" && -f "$TINDERBOX_PN_EXITCODES" ]]; then
+    printf '%s' "$TINDERBOX_PN_EXITCODES"
+    return 0
+  fi
+  local cand
+  for cand in \
+      "$BASELINE_DIR$CHROOT_PORTAGE_NG/Source/Application/Interface/exitcodes.pl" \
+      "$BASELINE_DIR/opt/portage-ng/Source/Application/Interface/exitcodes.pl"; do
+    if [[ -f "$cand" ]]; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Map a portage-ng numeric rc (+ optional logs) to a tinderbox-ng status label.
+_pn_exit_status() {
+  local rc="$1" mode="$2" plan_log="${3:-}" build_log="${4:-}"
+  local helper="$LIBEXEC_DIR/portage-ng-exit-label.py"
+  local exitcodes pl
+  pl="$(_pn_exitcodes_pl 2>/dev/null || true)"
+  if [[ -f "$helper" ]]; then
+    local -a args=(--rc "$rc" "--mode=$mode")
+    [[ -n "$pl" ]] && args+=(--exitcodes "$pl")
+    [[ -n "$plan_log" && -f "$plan_log" ]] && args+=(--plan-log "$plan_log")
+    [[ -n "$build_log" && -f "$build_log" ]] && args+=(--build-log "$build_log")
+    local label
+    label="$(python3 "$helper" "${args[@]}" 2>/dev/null)" || label=""
+    if [[ -n "$label" ]]; then
+      printf '%s' "$label"
+      return 0
+    fi
+  fi
+  # Minimal fallback when helper is missing (dev checkout without libexec sync).
+  case "$rc" in
+    0)   printf '%s' 'OK' ;;
+    1)   printf '%s' 'OK(cycles)' ;;
+    2)   printf '%s' 'OK(assumed)' ;;
+    3)   printf '%s' 'EXEC(failed)' ;;
+    124) printf '%s' 'TIMEOUT' ;;
+    137) printf '%s' 'KILLED(SIGKILL)' ;;
+    143) printf '%s' 'KILLED(SIGTERM)' ;;
+    *)   printf '%s' "CRASH($rc)" ;;
+  esac
+}
+
+# emerge: standard 0=success; non-zero stays numeric for now.
+_em_exit_status() {
+  local rc="$1"
+  case "$rc" in
+    0)   printf '%s' 'OK' ;;
+    124) printf '%s' 'TIMEOUT' ;;
+    137) printf '%s' 'KILLED(SIGKILL)' ;;
+    143) printf '%s' 'KILLED(SIGTERM)' ;;
+    *)   printf '%s' "FAIL($rc)" ;;
+  esac
+}
+
 # Output is plain stdout so it's easy to redirect or pipe to less.
 _compare_summarize() {
   # Don't let a failing grep or empty pipeline kill the summary mid-render.
@@ -2694,30 +2758,9 @@ _compare_summarize() {
   local pn_rc="$9" em_rc="${10}"
   local logdir="${11}"
 
-  # portage-ng exit-code semantics (per .cursorrules):
-  #   0 = no assumptions
-  #   1 = only prover cycle-break assumptions
-  #   2 = at least one domain assumption (e.g. masked dep)
-  # All three indicate the planner produced a plan; only larger codes
-  # (or a missing rc altogether) mean a real crash. emerge follows the
-  # standard 0=success/non-zero=failure convention.
   local pn_status em_status
-  case "$pn_rc" in
-    0)   pn_status="OK" ;;
-    1)   pn_status="OK(cycles)" ;;
-    2)   pn_status="OK(assumed)" ;;
-    124) pn_status="TIMEOUT" ;;
-    137) pn_status="KILLED(SIGKILL)" ;;   # almost always OOM in the matrix
-    143) pn_status="KILLED(SIGTERM)" ;;
-    *)   pn_status="FAIL($pn_rc)" ;;
-  esac
-  case "$em_rc" in
-    0)   em_status="OK" ;;
-    124) em_status="TIMEOUT" ;;
-    137) em_status="KILLED(SIGKILL)" ;;
-    143) em_status="KILLED(SIGTERM)" ;;
-    *)   em_status="FAIL($em_rc)" ;;
-  esac
+  pn_status="$(_pn_exit_status "$pn_rc" "$mode" "$pn_plan_log" "$pn_build_log")"
+  em_status="$(_em_exit_status "$em_rc")"
 
   # Reclassify fetch-restricted ebuilds (RESTRICT="fetch" or RESTRICT="mirror"
   # with no upstream binary mirror, e.g. app-arch/stuffit, app-office/moneydance,
@@ -3629,7 +3672,7 @@ _progress_render_frame() {
       {
         total++
         pn=$3; em=$4; vdb=$11
-        is_ok_pn = (pn == "OK")
+        is_ok_pn = (pn == "OK" || pn ~ /^OK\(/ )
         is_ok_em = (em == "OK")
         if      (is_ok_pn && is_ok_em)  { okok++;     if (vdb != "=") vdb_mismatch++ }
         else if (is_ok_pn && !is_ok_em) { okfail++ }
@@ -3802,20 +3845,22 @@ _progress_render_frame() {
   printf '\n'
 
   # ---- Recent completions (matrix only) ----
-  # compare-matrix emits literal "OK" / "FAIL(N)" / "?" in the pn_exit/em_exit
-  # columns (never numeric exit codes). Colour: green=ok, red=fail, dim=?.
+  # compare-matrix emits semantic pn_exit/em_exit labels (OK, OK(cycles),
+  # EXEC(failed), TARGET(invalid), CRASH(N), …). Colour: green=ok,
+  # red=fail/crash, yellow=infra/restrict, dim=?.
   # Pad after the ANSI reset so visible width stays consistent regardless of
   # the (invisible) escape bytes injected.
   if [[ -n "$run" && -f "$run/results.tsv" ]]; then
     printf '\033[1mRecent completions (last 5)\033[0m\n'
     printf '  %-40s  %-7s  %-7s  %-6s  %s\n' TARGET PN EM VDB SECS
     tail -n 5 "$run/results.tsv" | awk -F'\t' '
-      BEGIN { G="\033[32m"; R="\033[31m"; D="\033[2m"; N="\033[0m"; PAD="          " }
+      BEGIN { G="\033[32m"; R="\033[31m"; Y="\033[33m"; D="\033[2m"; N="\033[0m"; PAD="          " }
       function sym(s,    label,col,vis) {
-        if      (s == "OK")            { label="ok";   col=G }
-        else if (s ~ /^FAIL/)          { label="fail"; col=R }
-        else if (s == "" || s == "?")  { label="?";    col=D }
-        else                            { label=s;     col="" }
+        if      (s == "OK" || s ~ /^OK\(/ )     { label="ok";   col=G }
+        else if (s ~ /^(EXEC|TARGET|CLI|CRASH|FAIL|KILLED|TIMEOUT)/ ) { label="fail"; col=R }
+        else if (s ~ /^(RESTRICT|INFRA)/ )     { label="infra"; col=Y }
+        else if (s == "" || s == "?")          { label="?";    col=D }
+        else                                    { label=s;     col="" }
         vis = 7 - length(label); if (vis < 1) vis = 1
         return col label N substr(PAD, 1, vis)
       }
