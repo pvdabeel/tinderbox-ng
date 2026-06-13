@@ -12,14 +12,14 @@ Success (plan produced):
   2 -> OK(assumed)
 
 Failure (FAIL(*) matches emerge's FAIL(N) shape):
-  execution_failed / rc 3 -> FAIL(exec) or FAIL(target) via log heuristics
+  execution_failed / rc 3 -> FAIL(plan), FAIL(build), or FAIL(target) via logs
   invalid_targets      -> FAIL(target)
   cli_error            -> FAIL(cli)
   *                    -> FAIL(N)
 
 Special (handled by tinderbox-ng after this helper returns):
   RESTRICT(fetch), INFRA(overlay-inode-flicker) — log-based reclassifiers in
-  _compare_summarize overwrite FAIL(exec) when applicable.
+  _compare_summarize overwrite FAIL(build) when applicable.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ NAME_LABEL: dict[str, str] = {
     "clean": "OK",
     "cycle_breaks": "OK(cycles)",
     "domain_assumptions": "OK(assumed)",
-    "execution_failed": "FAIL(exec)",
+    "execution_failed": "FAIL(build)",
     "invalid_targets": "FAIL(target)",
     "cli_error": "FAIL(cli)",
 }
@@ -93,17 +93,19 @@ def plan_produced(plan_log: Path | None, build_log: Path | None) -> bool:
     return False
 
 
+def build_pass_ran(build_log: Path | None) -> bool:
+    return bool(build_log and build_log.is_file() and build_log.stat().st_size > 0)
+
+
 def refine_execution_failed(
     mode: str, plan_log: Path | None, build_log: Path | None
 ) -> str:
     blob = "\n".join((_read(plan_log), _read(build_log)))
     if INVALID_TARGET_RE.search(blob):
         return "FAIL(target)"
-    if BUILD_FAILED_RE.search(blob):
-        return "FAIL(exec)"
-    if mode == "--pretend":
-        return "FAIL(target)"
-    return "FAIL(exec)"
+    if BUILD_FAILED_RE.search(blob) or build_pass_ran(build_log):
+        return "FAIL(build)"
+    return "FAIL(plan)"
 
 
 def label_for(
@@ -140,7 +142,7 @@ def label_for(
         return f"FAIL({rc_i})"
 
     label = name_to_label(name)
-    if name == "execution_failed" or (rc_i == 3 and label == "FAIL(exec)"):
+    if name == "execution_failed" or rc_i == 3:
         return refine_execution_failed(mode, plan_log, build_log)
     if name == "invalid_targets":
         return "FAIL(target)"

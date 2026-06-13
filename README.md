@@ -391,7 +391,7 @@ reads that table at compare time (from the baseline copy under
 | 0 | `OK` | Clean plan (no assumptions) |
 | 1 | `OK(cycles)` | Plan with prover cycle-break assumptions only |
 | 2 | `OK(assumed)` | Plan with ≥1 domain assumption (e.g. masked dep) |
-| 3 | `FAIL(exec)` or `FAIL(target)` | Build step failed, or no resolvable target (log-heuristic disambiguation) |
+| 3 | `FAIL(plan)`, `FAIL(build)`, or `FAIL(target)` | Plan/build step failed, or no resolvable target (log-heuristic disambiguation) |
 | 1 (no plan footer) | `FAIL(cli)` | Interface catch-all / CLI failure misreported as rc 1 |
 | other | `FAIL(N)` | Unexpected non-zero exit (matches emerge's `FAIL(N)` shape) |
 | 124 / 137 / 143 | `TIMEOUT` / `KILLED(...)` | watchdog / signal |

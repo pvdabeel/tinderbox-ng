@@ -2727,7 +2727,7 @@ _pn_exit_status() {
     0)   printf '%s' 'OK' ;;
     1)   printf '%s' 'OK(cycles)' ;;
     2)   printf '%s' 'OK(assumed)' ;;
-    3)   printf '%s' 'FAIL(exec)' ;;
+    3)   printf '%s' 'FAIL(3)' ;;
     124) printf '%s' 'TIMEOUT' ;;
     137) printf '%s' 'KILLED(SIGKILL)' ;;
     143) printf '%s' 'KILLED(SIGTERM)' ;;
@@ -3846,7 +3846,7 @@ _progress_render_frame() {
 
   # ---- Recent completions (matrix only) ----
   # compare-matrix emits semantic pn_exit/em_exit labels (OK, OK(cycles),
-  # FAIL(exec), FAIL(target), FAIL(N), …). Colour: green=ok,
+  # FAIL(plan), FAIL(build), FAIL(target), FAIL(N), …). Colour: green=ok,
   # red=fail, yellow=infra/restrict, dim=?.
   # Pad after the ANSI reset so visible width stays consistent regardless of
   # the (invisible) escape bytes injected.
