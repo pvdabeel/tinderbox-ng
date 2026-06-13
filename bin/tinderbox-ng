@@ -2727,11 +2727,11 @@ _pn_exit_status() {
     0)   printf '%s' 'OK' ;;
     1)   printf '%s' 'OK(cycles)' ;;
     2)   printf '%s' 'OK(assumed)' ;;
-    3)   printf '%s' 'EXEC(failed)' ;;
+    3)   printf '%s' 'FAIL(exec)' ;;
     124) printf '%s' 'TIMEOUT' ;;
     137) printf '%s' 'KILLED(SIGKILL)' ;;
     143) printf '%s' 'KILLED(SIGTERM)' ;;
-    *)   printf '%s' "CRASH($rc)" ;;
+    *)   printf '%s' "FAIL($rc)" ;;
   esac
 }
 
@@ -3846,8 +3846,8 @@ _progress_render_frame() {
 
   # ---- Recent completions (matrix only) ----
   # compare-matrix emits semantic pn_exit/em_exit labels (OK, OK(cycles),
-  # EXEC(failed), TARGET(invalid), CRASH(N), …). Colour: green=ok,
-  # red=fail/crash, yellow=infra/restrict, dim=?.
+  # FAIL(exec), FAIL(target), FAIL(N), …). Colour: green=ok,
+  # red=fail, yellow=infra/restrict, dim=?.
   # Pad after the ANSI reset so visible width stays consistent regardless of
   # the (invisible) escape bytes injected.
   if [[ -n "$run" && -f "$run/results.tsv" ]]; then
@@ -3857,7 +3857,7 @@ _progress_render_frame() {
       BEGIN { G="\033[32m"; R="\033[31m"; Y="\033[33m"; D="\033[2m"; N="\033[0m"; PAD="          " }
       function sym(s,    label,col,vis) {
         if      (s == "OK" || s ~ /^OK\(/ )     { label="ok";   col=G }
-        else if (s ~ /^(EXEC|TARGET|CLI|CRASH|FAIL|KILLED|TIMEOUT)/ ) { label="fail"; col=R }
+        else if (s ~ /^FAIL\(/ || s ~ /^KILLED/ || s == "TIMEOUT" ) { label="fail"; col=R }
         else if (s ~ /^(RESTRICT|INFRA)/ )     { label="infra"; col=Y }
         else if (s == "" || s == "?")          { label="?";    col=D }
         else                                    { label=s;     col="" }

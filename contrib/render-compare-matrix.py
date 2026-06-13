@@ -406,7 +406,7 @@ def render(pretend: Optional[list[dict]],
         parts.append("- `OK` — exit 0, plan produced with no assumptions")
         parts.append("- `OK(cycles)` — exit 1, prover cycle-break assumptions")
         parts.append("- `OK(assumed)` — exit 2, ≥1 domain assumption (e.g. masked dep)")
-        parts.append("- `EXEC(failed)` / `TARGET(invalid)` / `CLI(error)` / `CRASH(N)` — "
+        parts.append("- `FAIL(exec)` / `FAIL(target)` / `FAIL(cli)` / `FAIL(N)` — "
                        "semantic portage-ng failure labels (see portage-ng-exit-label.py)\n")
         parts.append("### emerge plan failures\n")
         em_fail = [r for r in pretend if r["em_exit"] != "OK"]

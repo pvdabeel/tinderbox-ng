@@ -288,13 +288,13 @@ column carries one of:
 (rc 137, almost always OOM in the matrix),
 .B KILLED(SIGTERM)
 (rc 143),
-.B EXEC(failed)
+.B FAIL(exec)
 (build step failed, portage\-ng rc 3),
-.B TARGET(invalid)
+.B FAIL(target)
 (no resolvable target, portage\-ng rc 3),
-.B CLI(error)
+.B FAIL(cli)
 (interface/CLI failure without a plan footer),
-.B CRASH( N )
+.BI FAIL( N )
 (unexpected non\-zero exit not in portage\-ng's
 .IR exitcodes.pl
 table),

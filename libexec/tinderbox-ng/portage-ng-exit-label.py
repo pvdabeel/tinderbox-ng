@@ -11,15 +11,15 @@ Success (plan produced):
   1 -> OK(cycles)
   2 -> OK(assumed)
 
-Failure (semantic labels; numeric code kept only when unknown):
-  execution_failed / rc 3 -> EXEC(failed) or TARGET(invalid) via log heuristics
-  invalid_targets      -> TARGET(invalid)
-  cli_error            -> CLI(error)
-  *                    -> CRASH(N)
+Failure (FAIL(*) matches emerge's FAIL(N) shape):
+  execution_failed / rc 3 -> FAIL(exec) or FAIL(target) via log heuristics
+  invalid_targets      -> FAIL(target)
+  cli_error            -> FAIL(cli)
+  *                    -> FAIL(N)
 
 Special (handled by tinderbox-ng after this helper returns):
   RESTRICT(fetch), INFRA(overlay-inode-flicker) — log-based reclassifiers in
-  _compare_summarize overwrite EXEC(failed) when applicable.
+  _compare_summarize overwrite FAIL(exec) when applicable.
 """
 
 from __future__ import annotations
@@ -38,9 +38,9 @@ NAME_LABEL: dict[str, str] = {
     "clean": "OK",
     "cycle_breaks": "OK(cycles)",
     "domain_assumptions": "OK(assumed)",
-    "execution_failed": "EXEC(failed)",
-    "invalid_targets": "TARGET(invalid)",
-    "cli_error": "CLI(error)",
+    "execution_failed": "FAIL(exec)",
+    "invalid_targets": "FAIL(target)",
+    "cli_error": "FAIL(cli)",
 }
 
 # Numeric fallbacks for codes used in portage-ng before they land in exitcodes.pl
@@ -75,10 +75,7 @@ def parse_exitcodes(path: Path) -> dict[int, str]:
 def name_to_label(name: str) -> str:
     if name in NAME_LABEL:
         return NAME_LABEL[name]
-    if "_" in name:
-        prefix, rest = name.split("_", 1)
-        return f"{prefix.upper()}({rest.replace('_', '-')})"
-    return name.upper()
+    return f"FAIL({name.replace('_', '-')})"
 
 
 def _read(path: Path | None) -> str:
@@ -101,12 +98,12 @@ def refine_execution_failed(
 ) -> str:
     blob = "\n".join((_read(plan_log), _read(build_log)))
     if INVALID_TARGET_RE.search(blob):
-        return "TARGET(invalid)"
+        return "FAIL(target)"
     if BUILD_FAILED_RE.search(blob):
-        return "EXEC(failed)"
+        return "FAIL(exec)"
     if mode == "--pretend":
-        return "TARGET(invalid)"
-    return "EXEC(failed)"
+        return "FAIL(target)"
+    return "FAIL(exec)"
 
 
 def label_for(
@@ -133,20 +130,20 @@ def label_for(
     name = table.get(rc_i) or FALLBACK_CODE_NAME.get(rc_i)
 
     if name is None:
-        return f"CRASH({rc_i})"
+        return f"FAIL({rc_i})"
 
     if rc_i in (0, 1, 2):
         if rc_i == 0 or plan_produced(plan_log, build_log):
             return name_to_label(name)
         if rc_i == 1:
-            return "CLI(error)"
-        return f"CRASH({rc_i})"
+            return "FAIL(cli)"
+        return f"FAIL({rc_i})"
 
     label = name_to_label(name)
-    if name == "execution_failed" or (rc_i == 3 and label == "EXEC(failed)"):
+    if name == "execution_failed" or (rc_i == 3 and label == "FAIL(exec)"):
         return refine_execution_failed(mode, plan_log, build_log)
     if name == "invalid_targets":
-        return "TARGET(invalid)"
+        return "FAIL(target)"
     return label
 
 
