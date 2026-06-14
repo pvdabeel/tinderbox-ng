@@ -77,9 +77,42 @@ _pn_autodetect() {
   printf ''
 }
 
+_pn_binpkg_exec_pl() {
+  printf '%s/%s' "$1" "$PN_BINPKG_EXEC_REL"
+}
+
+_pn_has_ensure_index_fresh() {
+  local pl
+  pl="$(_pn_binpkg_exec_pl "$1")"
+  [[ -f "$pl" ]] && grep -q 'ensure_index_fresh' "$pl"
+}
+
+# In-chroot portage-ng-dev invocation for compare / pn / matrix. Always
+# `--mode standalone`: each compare session owns an isolated overlay VDB.
+# Upstream `--mode ipc` + daemon (portage-ng#80 item D) serializes
+# requests and shares the daemon's ROOT, so it is unsuitable for parallel
+# compare-matrix workers even though it warms the binpkg index.
+_pn_portage_ng_cmd() {
+  local to mode_flag
+  if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then
+    to="$1"
+    shift
+  else
+    to="${TINDERBOX_BUILD_TIMEOUT:-43200}"
+  fi
+  mode_flag="$1"
+  shift
+  printf 'cd /opt/portage-ng && timeout %s ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci %s %s' \
+    "$to" "$mode_flag" "$*"
+}
+
 PORTAGE_NG_URL="${PORTAGE_NG_URL:-}"
 PORTAGE_NG_LOCAL="${PORTAGE_NG_LOCAL:-$(_pn_autodetect)}"
 PORTAGE_NG_REF="${PORTAGE_NG_REF:-HEAD}"
+# portage-ng issue #80: mtime-gated binpkg index refresh + in-memory
+# self-inject. doctor warns when baseline/host checkout predates this.
+PORTAGE_NG_MIN_ISSUE80_COMMIT="${PORTAGE_NG_MIN_ISSUE80_COMMIT:-4ba5099c}"
+PN_BINPKG_EXEC_REL="Source/Domain/Gentoo/Binpkg/binpkg_exec.pl"
 
 # Library + share directories. The canonical layout is "the repo, copied
 # verbatim under one prefix":
@@ -762,6 +795,23 @@ cmd_doctor() {
     log_error "  Set PORTAGE_NG_LOCAL=/path/to/portage-ng (must contain portage-ng.pl"
     log_error "  at the root or Source/loader.pl) or PORTAGE_NG_URL=https://... PORTAGE_NG_REF=<ref>."
     fail=$((fail+1))
+  fi
+
+  # portage-ng#80: mtime-gated binpkg refresh (ensure_index_fresh/0).
+  if [[ -n "$PORTAGE_NG_LOCAL" ]] && _pn_has_ensure_index_fresh "$PORTAGE_NG_LOCAL"; then
+    log_ok "host portage-ng checkout has binpkg ensure_index_fresh (issue #80)"
+  elif [[ -n "$PORTAGE_NG_LOCAL" ]] && [[ -f "$(_pn_binpkg_exec_pl "$PORTAGE_NG_LOCAL")" ]]; then
+    log_warn "host portage-ng checkout predates issue #80 (no ensure_index_fresh in binpkg_exec.pl)"
+    log_warn "  update the host checkout to >= $PORTAGE_NG_MIN_ISSUE80_COMMIT, then refresh-portage-ng"
+    warn=$((warn+1))
+  fi
+  if [[ -d "$BASELINE_DIR$CHROOT_PORTAGE_NG" ]]; then
+    if _pn_has_ensure_index_fresh "$BASELINE_DIR$CHROOT_PORTAGE_NG"; then
+      log_ok "baseline portage-ng has binpkg ensure_index_fresh (issue #80)"
+    else
+      log_warn "baseline portage-ng predates issue #80; run refresh-portage-ng after updating the host checkout"
+      warn=$((warn+1))
+    fi
   fi
 
   # Disk space (only meaningful pre-bootstrap; warn if tight)
@@ -1664,6 +1714,13 @@ _patch_portage_ng_host_config() {
   fi
 
   # Patch 2: append config:binpkg_refresh(mtime) override (idempotent).
+  #
+  # Complements portage-ng#80's `binpkg_exec:ensure_index_fresh/0`, which
+  # skips full Packages re-parses when the index mtime is unchanged inside
+  # a standalone process. The mtime override here is still required for
+  # parallel compare-matrix workers: each worker is its own process, so
+  # sibling-produced binpkgs only become visible when the on-disk index
+  # mtime advances and the next ensure_index_fresh/available_for probe runs.
   if grep -qE '^[[:space:]]*config:binpkg_refresh\b' "$host_cfg"; then
     log_info "  $host_cfg: config:binpkg_refresh already set; leaving alone"
     return 0
@@ -2166,7 +2223,8 @@ cmd_portage_ng() {
   done
   [[ ${#positional[@]} -gt 0 ]] || die "no portage-ng arguments after flags"
 
-  local cmd="cd /opt/portage-ng && timeout ${TINDERBOX_BUILD_TIMEOUT:-43200} ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci $mode_flag ${positional[*]}"
+  local cmd
+  cmd="$(_pn_portage_ng_cmd "$mode_flag" "${positional[*]}")"
   cmd_exec "$name" -- "$cmd"
 }
 
@@ -2497,14 +2555,17 @@ _compare_run_portage_ng() {
   plan_end_file="${combined}.plan_end"
   local t0 t1 rc
   t0="$(date +%s.%N)"
-  # Stream stdout so we can stamp when the build phase begins (% Binpkg
-  # scroll or first [step N] line) before post-processing the transcript.
+  # Stream stdout so we can stamp when the build phase begins (first
+  # [step N] under --ci; legacy % Binpkg scroll when --verbose) before
+  # post-processing the transcript.
   set +o pipefail
   _unshare_ns "$0" __ns-helper session "$sess" /bin/bash -l -c "$cmd" 2>&1 | \
     while IFS= read -r line || [[ -n "$line" ]]; do
       printf '%s\n' "$line" >>"$combined"
       if [[ -z "$plan_end" ]] && \
-         { [[ "$line" == *"% Binpkg:"* ]] || [[ "$line" =~ \[step[[:space:]]+[0-9]+\] ]]; }; then
+         { [[ "$line" =~ \[step[[:space:]]+[0-9]+\] ]] \
+         || [[ "$line" == *"% Binpkg:"* ]] \
+         || [[ "$line" == *"Updated prolog knowledgebase"* ]]; }; then
         plan_end="$(date +%s.%N)"
         printf '%s\n' "$plan_end" >"$plan_end_file"
       fi
@@ -2641,8 +2702,10 @@ cmd_compare() {
   local BUILD_TO="${TINDERBOX_BUILD_TIMEOUT:-43200}"
   local PLAN_TO="${TINDERBOX_PLAN_TIMEOUT:-1800}"
   if (( PLAN_TO > BUILD_TO )); then PLAN_TO="$BUILD_TO"; fi
-  local pn_plan_cmd="cd /opt/portage-ng && timeout $PLAN_TO ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci --pretend $target"
-  local pn_build_cmd="cd /opt/portage-ng && timeout $BUILD_TO ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci --build $target"
+  local pn_plan_cmd pn_build_cmd pn_single_cmd
+  pn_plan_cmd="$(_pn_portage_ng_cmd "$PLAN_TO" --pretend "$target")"
+  pn_build_cmd="$(_pn_portage_ng_cmd "$BUILD_TO" --build "$target")"
+  pn_single_cmd="$(_pn_portage_ng_cmd "$BUILD_TO" --build "$target")"
   local em_plan_cmd="timeout $PLAN_TO /usr/bin/emerge --color=n --oneshot --verbose --pretend $target"
   # PORTAGE_LOGDIR=/var/log/portage makes Portage retain a per-ebuild log
   # at /var/log/portage/<cat>:<pf>:<ts>.log even when FEATURES=clean wipes
@@ -2668,8 +2731,7 @@ cmd_compare() {
   # Acceptable rc gate for a follow-on build: portage-ng 0/1/2, emerge 0.
   ( set +e
     if [[ "$mode" == "--build" ]] && _compare_pn_single_pass; then
-      _compare_run_portage_ng "$pn_plan_log" "$pn_build_log" "$sess_pn" \
-        "cd /opt/portage-ng && timeout $BUILD_TO ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci --build $target"
+      _compare_run_portage_ng "$pn_plan_log" "$pn_build_log" "$sess_pn" "$pn_single_cmd"
     else
       _compare_run_pass "$pn_plan_log" "$sess_pn" "$pn_plan_cmd"
       pn_plan_rc=$?
@@ -4919,6 +4981,10 @@ Environment:
   PORTAGE_NG_URL                  If set: git clone. Otherwise rsync PORTAGE_NG_LOCAL.
   PORTAGE_NG_LOCAL                Host checkout to seed baseline (default: /usr/local/share/portage-ng).
   PORTAGE_NG_CLONE                Same default path as ami-tinder.sh (override if needed).
+  PORTAGE_NG_REF                  Git ref when PORTAGE_NG_URL is set (default HEAD).
+                                  Pin to 4ba5099c+ for issue #80 binpkg perf.
+  PORTAGE_NG_MIN_ISSUE80_COMMIT   Commit doctor uses for issue #80 warnings
+                                  (default 4ba5099c).
   TINDERBOX_REBOOTSTRAP=1         Allow `bootstrap` to overwrite an existing baseline.
 
 See README.md in this repository for deployment notes.

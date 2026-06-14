@@ -10,6 +10,10 @@ pipeline expects:
   portage-ng.plan.log   planner output ending at ``Total: N actions``
   portage-ng.build.log  binpkg index refresh + step execution
 
+Under portage-ng#80 with ``--ci``, the build phase begins at the first
+``[step N]`` line; legacy ``% Binpkg:`` scroll only appears with
+``--verbose``.
+
 Timing metadata is estimated by line-fraction between pass start/end
 wall clocks (good enough for extract-timing aggregates).
 """
@@ -25,9 +29,9 @@ from pathlib import Path
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 PLAN_FOOTER_RE = re.compile(r"Total:\s+\d+\s+actions?", re.IGNORECASE)
 BUILD_MARKERS = (
-    re.compile(r"%\s*Binpkg:", re.IGNORECASE),
     re.compile(r"\[step\s+\d+\]", re.IGNORECASE),
-    re.compile(r"Updated prolog knowledgebase\.\s*Binpkg variants:", re.IGNORECASE),
+    re.compile(r"Updated prolog knowledgebase", re.IGNORECASE),
+    re.compile(r"%\s*Binpkg:", re.IGNORECASE),
 )
 
 

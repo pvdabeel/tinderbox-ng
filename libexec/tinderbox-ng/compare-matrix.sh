@@ -25,7 +25,10 @@
 #
 # `--jobs N` runs N package comparisons concurrently. Each comparison
 # itself spawns 2 sessions (portage-ng + emerge in parallel mount
-# namespaces), so the actual session count peaks at 2N. The vm-linux
+# namespaces), so the actual session count peaks at 2N. portage-ng always
+# runs `--mode standalone` (never ipc): parallel matrix workers need
+# session-isolated VDBs; issue #80 speedups (mtime-gated binpkg refresh)
+# apply automatically after refresh-portage-ng @ 4ba5099c+. The vm-linux
 # baseline easily handles N=8 on a 32-core box, and N=16 with the
 # sessions tmpfs at 100G; tune to keep load under (cores - small
 # headroom).
