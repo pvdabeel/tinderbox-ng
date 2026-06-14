@@ -244,6 +244,7 @@ TINDERBOX_REQUIRED_HELPERS=(
   run-matrix.sh
   compare-matrix.sh
   compare-merge-emerge.py
+  compare-portage-ng-split.py
   consolidate-phase-stats.py
   extract-timing.py
   portage-ng-exit-label.py
@@ -2478,6 +2479,89 @@ _compare_run_pass() {
   return "$rc"
 }
 
+# _compare_run_portage_ng <plan-log> <build-log> <session> <command-string>
+#
+# Run portage-ng --build once (single SWI-Prolog process: plan + execute),
+# then split the combined transcript into the legacy plan/build log files
+# via libexec/tinderbox-ng/compare-portage-ng-split.py.
+#
+# Saves ~15-20s per compare vs the old pretend-then-build pair of cold
+# starts. Set TINDERBOX_COMPARE_PN_SINGLE_PASS=0 to revert to two passes.
+# Returns the combined command rc.
+_compare_run_portage_ng() {
+  local plan_log="$1" build_log="$2" sess="$3" cmd="$4"
+  local helper="$LIBEXEC_DIR/compare-portage-ng-split.py"
+  local combined meta plan_end_file plan_end=""
+  combined="${plan_log}.combined.$$"
+  meta="${plan_log}.splitmeta.$$"
+  plan_end_file="${combined}.plan_end"
+  local t0 t1 rc
+  t0="$(date +%s.%N)"
+  # Stream stdout so we can stamp when the build phase begins (% Binpkg
+  # scroll or first [step N] line) before post-processing the transcript.
+  set +o pipefail
+  _unshare_ns "$0" __ns-helper session "$sess" /bin/bash -l -c "$cmd" 2>&1 | \
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      printf '%s\n' "$line" >>"$combined"
+      if [[ -z "$plan_end" ]] && \
+         { [[ "$line" == *"% Binpkg:"* ]] || [[ "$line" =~ \[step[[:space:]]+[0-9]+\] ]]; }; then
+        plan_end="$(date +%s.%N)"
+        printf '%s\n' "$plan_end" >"$plan_end_file"
+      fi
+    done
+  rc=${PIPESTATUS[0]}
+  set -o pipefail
+  t1="$(date +%s.%N)"
+  [[ -z "$plan_end" && -f "$plan_end_file" ]] && plan_end="$(cat "$plan_end_file")"
+  local -a split_args=(
+    --combined "$combined"
+    --plan "$plan_log"
+    --build "$build_log"
+    --started "$t0"
+    --ended "$t1"
+    --rc "$rc"
+    --meta "$meta"
+  )
+  [[ -n "$plan_end" ]] && split_args+=(--plan-end "$plan_end")
+  if [[ ! -f "$helper" ]]; then
+    log_warn "compare: $helper missing; keeping unsplit portage-ng log"
+    cp -f "$combined" "$plan_log" 2>/dev/null || true
+    printf '%d\n' "$rc" >"$plan_log.exit"
+    awk -v t0="$t0" -v t1="$t1" -v rc="$rc" '
+      BEGIN {
+        printf "started=%d\n", t0
+        printf "ended=%d\n", t1
+        printf "wall_time_ms=%d\n", (t1 - t0) * 1000
+        printf "rc=%d\n", rc
+      }
+    ' >"$plan_log.timing"
+  elif ! python3 "$helper" \
+      "${split_args[@]}" \
+      2>"${plan_log}.split.err"; then
+    log_warn "compare: portage-ng log split failed ($(head -c 200 "${plan_log}.split.err" 2>/dev/null))"
+    cp -f "$combined" "$plan_log" 2>/dev/null || true
+    printf '%d\n' "$rc" >"$plan_log.exit"
+    awk -v t0="$t0" -v t1="$t1" -v rc="$rc" '
+      BEGIN {
+        printf "started=%d\n", t0
+        printf "ended=%d\n", t1
+        printf "wall_time_ms=%d\n", (t1 - t0) * 1000
+        printf "rc=%d\n", rc
+      }
+    ' >"$plan_log.timing"
+  fi
+  rm -f "$combined" "$meta" "${plan_log}.split.err" "$plan_end_file"
+  return "$rc"
+}
+
+# Truthy when compare should run portage-ng --build in one process (default).
+_compare_pn_single_pass() {
+  case "${TINDERBOX_COMPARE_PN_SINGLE_PASS:-1}" in
+    0|n|N|no|NO|false|FALSE|off|OFF) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 cmd_compare() {
   require_root
   require_kernel_overlay
@@ -2533,12 +2617,15 @@ cmd_compare() {
 
   log_info "  running both engines in parallel (logs: $logdir)"
 
-  # Plan pass always runs --pretend regardless of the requested mode;
-  # the build pass (only invoked when mode=--build and the plan pass
-  # succeeded) runs without --pretend. Splitting the two passes lets
-  # us archive the resolver output and the build output separately,
-  # which is exactly what an operator wants when triaging a build
-  # failure: was it the plan that diverged, or the execution?
+  # emerge always runs plan (--pretend) then build as two chroot passes.
+  #
+  # portage-ng: by default `--build` mode uses a single SWI-Prolog process
+  # (`--build` plans then executes internally) and splits the transcript
+  # into portage-ng.plan.log / portage-ng.build.log afterward. `--pretend`
+  # mode still runs one `--pretend` pass. Set
+  # TINDERBOX_COMPARE_PN_SINGLE_PASS=0 to restore the legacy two-pass
+  # portage-ng shape (separate cold starts for pretend and build).
+  #
   # Split timeouts: planning is bounded (resolver is CPU only, never waits
   # on the network or compilers), the build pass can chase pathologically
   # large source trees (libreoffice, dev-lang/pypy, dev-lang/spark,
@@ -2575,18 +2662,20 @@ cmd_compare() {
   # domain assumptions" which is a normal outcome, not a crash, so
   # this guard is essential.
   #
-  # Each engine's subshell runs the plan pass first, then conditionally
-  # the build pass. The build pass uses a fresh mount namespace but
-  # the same session, so it sees the overlay upper layer's post-plan
-  # state (in practice unchanged: --pretend writes nothing of
-  # consequence). The "acceptable rc" gate to proceed differs per
-  # engine: portage-ng treats 0/1/2 as "plan succeeded" (per
-  # .cursorrules), emerge requires rc=0.
+  # Each engine's subshell runs plan then (optionally) build. emerge uses
+  # a fresh mount namespace per pass; portage-ng --build uses one pass
+  # when TINDERBOX_COMPARE_PN_SINGLE_PASS is enabled (default).
+  # Acceptable rc gate for a follow-on build: portage-ng 0/1/2, emerge 0.
   ( set +e
-    _compare_run_pass "$pn_plan_log" "$sess_pn" "$pn_plan_cmd"
-    pn_plan_rc=$?
-    if [[ "$mode" == "--build" && "$pn_plan_rc" -le 2 ]]; then
-      _compare_run_pass "$pn_build_log" "$sess_pn" "$pn_build_cmd"
+    if [[ "$mode" == "--build" ]] && _compare_pn_single_pass; then
+      _compare_run_portage_ng "$pn_plan_log" "$pn_build_log" "$sess_pn" \
+        "cd /opt/portage-ng && timeout $BUILD_TO ./Source/Application/Wrapper/portage-ng-dev --mode standalone --ci --build $target"
+    else
+      _compare_run_pass "$pn_plan_log" "$sess_pn" "$pn_plan_cmd"
+      pn_plan_rc=$?
+      if [[ "$mode" == "--build" && "$pn_plan_rc" -le 2 ]]; then
+        _compare_run_pass "$pn_build_log" "$sess_pn" "$pn_build_cmd"
+      fi
     fi
   ) &
   local pn_pid=$!
@@ -4799,6 +4888,10 @@ Environment:
                                   (default 1800). Used by `compare`'s
                                   --pretend pass for both engines. Capped
                                   at TINDERBOX_BUILD_TIMEOUT.
+  TINDERBOX_COMPARE_PN_SINGLE_PASS  When 1 (default), `compare --build`
+                                  runs portage-ng once (--build) and splits
+                                  the log. Set 0 to use separate --pretend
+                                  and --build passes (legacy, slower).
   TINDERBOX_BUILD_TIMEOUT         Per-package build timeout in seconds
                                   (default 43200 = 12h). Used by `compare`'s
                                   --build pass for both engines, and by

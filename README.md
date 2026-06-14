@@ -376,7 +376,7 @@ combination of them in the cases tinderbox-ng exercises:
 | `--ci` | every in-chroot invocation | non-interactive; required for stable exit codes |
 | `--sync` | bootstrap, `refresh-kb` | populates `Knowledge/kb.qlf` (and `profile.qlf`) |
 | `--pretend` | `cmd_compare`, `cmd_portage_ng`, `tinderbox-matrix` | plan only |
-| `--build` | `cmd_compare`, `cmd_portage_ng`, `easy-pkgs.sh` | execute the plan |
+| `--build` | `cmd_compare`, `cmd_portage_ng`, `easy-pkgs.sh` | plan then execute (one SWI-Prolog process) |
 | `--timeout N` | (optional, only when wrapper template forwards it) | per-invocation watchdog |
 
 ### Exit-code triage
@@ -928,6 +928,7 @@ ships a particular `kb.qlf`, the resolver disagrees with `emerge`.
 | `GENTOO_LOCALE` | `en_US.UTF-8 UTF-8` | Appended to `/etc/locale.gen`. |
 | `GENTOO_LOCALE_NAME` | `en_US.utf8` | Argument to `eselect locale set`. |
 | `TINDERBOX_SESSIONS_TMPFS_SIZE` | `100G` | tmpfs cap for `$TINDERBOX_ROOT/sessions`. Empty/`0` disables. |
+| `TINDERBOX_COMPARE_PN_SINGLE_PASS` | `1` | `compare --build` runs portage-ng once (`--build`) and splits logs. Set `0` for legacy separate `--pretend` + `--build` passes. |
 | `TINDERBOX_CCACHE_MAX_SIZE` | `100G` | `max_size` written into `/etc/ccache.conf` by `bootstrap_install_ccache` and `install-ccache`. |
 | `TINDERBOX_REBOOTSTRAP` | (unset) | If set, `bootstrap` overwrites an existing baseline. |
 | `TINDERBOX_SKIP_DOCTOR` | (unset) | If set, `bootstrap` skips its preflight doctor pass. |

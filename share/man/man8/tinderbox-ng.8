@@ -316,6 +316,23 @@ Labels are resolved by
 Emerge failures remain
 .BI FAIL( N )
 for non\-zero exit codes.
+In
+.BR \-\-build
+mode,
+.B portage\-ng
+runs once per compare
+.RB ( \-\-build
+plans then executes in a single SWI\-Prolog process; the transcript is
+split into
+.I portage-ng.plan.log
+and
+.I portage-ng.build.log
+afterward).
+.B emerge
+still uses separate plan and build chroot passes.
+Set
+.B TINDERBOX_COMPARE_PN_SINGLE_PASS=0
+to restore the legacy two\-pass portage\-ng shape.
 The plan and build passes have separate timeouts \(em see
 .B TINDERBOX_PLAN_TIMEOUT
 and
@@ -680,6 +697,25 @@ Per\-package planning timeout in seconds for
 .B compare
 (default 1800). Capped at
 .BR TINDERBOX_BUILD_TIMEOUT .
+.TP
+.B TINDERBOX_COMPARE_PN_SINGLE_PASS
+When
+.RB 1
+(the default),
+.B "compare \-\-build"
+runs
+.B portage\-ng
+once
+.RB ( \-\-build
+plans then executes in one SWI\-Prolog process) and splits the transcript
+into plan/build logs afterward.
+Set
+.B 0
+to restore separate
+.B \-\-pretend
+and
+.B \-\-build
+passes (legacy; two cold starts per compare).
 .TP
 .B TINDERBOX_BUILD_TIMEOUT
 Per\-package build timeout in seconds for
