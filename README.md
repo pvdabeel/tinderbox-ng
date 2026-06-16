@@ -54,7 +54,7 @@ tinderbox-ng/
 │   └── tinderbox-ng.8                 # manpage (→ /usr/local/share/man/man8/)
 │
 ├── contrib/                           # Dev-machine helpers (NEVER deployed to the VM)
-│   ├── deploy-host.sh                 #   one-shot host install (rsync + symlink + doctor)
+│   ├── deploy-host.sh                 #   one-shot host install (git clone + symlink + doctor)
 │   ├── deploy-baseline.sh             #   safe scp of a single template (with @-token substitution)
 │   ├── render-compare-matrix.py       #   render compare-matrix TSVs to Markdown
 │   └── easy-pkgs.sh                   #   small smoke driver over a curated package list
@@ -88,7 +88,7 @@ After `bootstrap`, the rig populates the VM as:
 ## Deployment on the VM
 
 The script depends only on Bash 5+, `mount(8)`, `umount(8)`, `findmnt(8)`,
-`flock(1)`, `gpg(1)`, `curl(1)`, `git(1)`, `tar(1)`, `rsync(1)`, the
+`flock(1)`, `gpg(1)`, `curl(1)`, `git(1)`, `tar(1)`, the
 in-kernel `overlay` module, and (for the test matrix) `app-admin/moreutils`
 for `ts(1)` (optional — falls back to plain `tee`).
 
@@ -108,22 +108,17 @@ TINDERBOX_BOOTSTRAP_SELFTEST=1 \
 
 # Push portage-ng into an existing baseline (does NOT regenerate kb.qlf):
 contrib/deploy-host.sh --refresh-portage-ng root@vm-linux.local
-
-# Rsync uncommitted tinderbox-ng work from this laptop instead of git:
-contrib/deploy-host.sh --from-local root@vm-linux.local
 ```
 
 `deploy-host.sh` performs, in order:
 
-1. **Default (git):** `git clone` / `git fetch` of
+1. `git clone` / `git fetch` of
    [tinderbox-ng](https://github.com/pvdabeel/tinderbox-ng) into
-   `/usr/local/share/tinderbox-ng/` and
-   [portage-ng](https://github.com/pvdabeel/portage-ng) into
-   `/usr/local/share/portage-ng/` (same layout as `contrib/ami-tinder.sh`
-   on AWS). No host `/opt/portage-ng` — that path is only inside the
-   baseline chroot after bootstrap. **`--from-local`:** `rsync` of `bin/`, `libexec/`
-   and `share/` from this dev checkout instead (excludes `.git/`,
-   `reports/`, `contrib/`).
+   `/usr/local/share/tinderbox-ng/` on the remote (same model as
+   `contrib/ami-tinder.sh` on AWS). There is no rsync. portage-ng is NOT
+   installed on the host — it is git-cloned straight into the baseline by
+   `bootstrap` / `refresh-portage-ng`; no host `/opt/portage-ng`, that path
+   exists only inside the baseline chroot after bootstrap.
 2. Symlink `/usr/local/sbin/tinderbox-ng` →
    `/usr/local/share/tinderbox-ng/bin/tinderbox-ng`, plus
    `/usr/local/share/man/man8/tinderbox-ng.8` →
@@ -136,18 +131,17 @@ contrib/deploy-host.sh --from-local root@vm-linux.local
    `TINDERBOX_BOOTSTRAP_SELFTEST=1` during a `--bootstrap` run).
 
 Forwarded environment: `TINDERBOX_NG_URL`, `TINDERBOX_NG_REF`,
-`PORTAGE_NG_URL`, `PORTAGE_NG_REF` (git mode sets `PORTAGE_NG_LOCAL` to
-`/usr/local/share/portage-ng` automatically), plus
+`PORTAGE_NG_URL`, `PORTAGE_NG_REF` (portage-ng is git-cloned straight into
+the baseline; there is no host-side portage-ng checkout), plus
 `TINDERBOX_CCACHE_MAX_SIZE`, `STAGE3_*`, `GENTOO_PROFILE`, etc. — see
 `contrib/deploy-host.sh --help`.
 
 ### Manual install (equivalent steps)
 
 ```sh
-# From your dev machine, push the rig to the VM (excluding contrib/, which
-# stays on the dev machine):
-rsync -av --delete --exclude '/.git' --exclude '/reports' --exclude '/contrib' \
-  ./ vm-linux.local:/usr/local/share/tinderbox-ng/
+# On the VM, clone the rig from GitHub (commit + push your work first):
+ssh vm-linux.local sudo git clone https://github.com/pvdabeel/tinderbox-ng.git \
+  /usr/local/share/tinderbox-ng
 
 # Symlink the entry point onto $PATH:
 ssh vm-linux.local sudo ln -sf \
@@ -200,13 +194,12 @@ qualified) so any missing host-side tool is reported up front:
    shared cache is writable by Portage's `userfetch`/`usersandbox` user.
    Stage3 does not include ccache; without this step the
    `FEATURES="ccache"` bit is silently inert.
-9. Rsyncs `portage-ng` from the host checkout (`$PORTAGE_NG_LOCAL`,
-   default `$PORTAGE_NG_CLONE` = `/usr/local/share/portage-ng`) into
-   `baseline/opt/portage-ng` (in-chroot path `/opt/portage-ng`). Host
-   bootstrap does not git-clone into the baseline; use `deploy-host.sh`
-   (git) or set `PORTAGE_NG_URL` only if you intentionally want in-baseline
-   clone. `doctor` requires a host checkout at `PORTAGE_NG_CLONE` or
-   `PORTAGE_NG_LOCAL` before download.
+9. `git clone`s `portage-ng` from `$PORTAGE_NG_URL` @ `$PORTAGE_NG_REF`
+   (default `https://github.com/pvdabeel/portage-ng.git` @ `master`)
+   directly into `baseline/opt/portage-ng` (in-chroot path
+   `/opt/portage-ng`). There is no host-side portage-ng checkout and no
+   rsync; the baseline IS the clone. `refresh-portage-ng` later updates it
+   in place with `git fetch` + `reset --hard`.
 10. Installs the in-chroot `portage-ng-dev` launcher at
    `/usr/local/bin/portage-ng-dev` and `tinderbox-matrix` runner at
    `/usr/local/bin/tinderbox-matrix`.
@@ -261,7 +254,7 @@ emerge's death and otherwise pin a CPU at ~90% indefinitely.
 ```sh
 sudo tinderbox-ng refresh-tree <commit-hash>          # re-pin the tree
 sudo tinderbox-ng refresh-kb                          # regenerate kb.qlf
-sudo tinderbox-ng refresh-portage-ng                  # rsync new portage-ng source into baseline
+sudo tinderbox-ng refresh-portage-ng                  # git fetch new portage-ng source into baseline
 sudo TINDERBOX_CCACHE_MAX_SIZE=200G \
      tinderbox-ng install-ccache                      # bump cache cap or retrofit
 ```
@@ -274,12 +267,13 @@ plus `chattr -R -i` defensively in case an old freeze used it), runs
 `portage-ng-dev --sync` against the pinned tree, then re-freezes.
 
 `refresh-portage-ng` re-deploys the Prolog source tree itself (mirrors the
-`bootstrap_install_portage_ng` step). Use it after pulling new commits to
-the host-side checkout: every fresh session bind-mounts the baseline copy,
-so without this step new sessions keep running yesterday's resolver. It
-unfreezes, rsyncs (or `git fetch`/`reset --hard` if `PORTAGE_NG_URL` is
-set), refreshes the in-baseline `/usr/local/bin/portage-ng-dev` shim plus
-the `tinderbox-matrix` helper, then re-freezes. It does **not** regenerate
+`bootstrap_install_portage_ng` step). Use it after new commits land on
+`PORTAGE_NG_URL` @ `PORTAGE_NG_REF`: every fresh session bind-mounts the
+baseline copy, so without this step new sessions keep running yesterday's
+resolver. It unfreezes, runs `git fetch` + `reset --hard origin/$PORTAGE_NG_REF`
+inside the baseline clone, refreshes the in-baseline
+`/usr/local/bin/portage-ng-dev` shim plus the `tinderbox-matrix` helper,
+then re-freezes. It does **not** regenerate
 `kb.qlf` — only run `refresh-kb` for that, and only when the parser or
 grammar actually changed (planner / pipeline / scheduler / printer edits
 do not require it).
@@ -372,9 +366,8 @@ and the mtime-gated binpkg index refresh + in-memory self-inject from
 [issue #80](https://github.com/pvdabeel/portage-ng/issues/80)
 ([`4ba5099c`](https://github.com/pvdabeel/portage-ng/commit/4ba5099c)).
 Earlier extraction-era pin `26069d06` predates all three fixes and is
-no longer recommended. If you bump the on-host portage-ng checkout past
-a known-incompatible commit and bootstrap fails, pin
-`PORTAGE_NG_REF=4ba5099c` (when using `PORTAGE_NG_URL`) until the
+no longer recommended. If `PORTAGE_NG_REF` tracks a known-incompatible
+commit and bootstrap fails, pin `PORTAGE_NG_REF=4ba5099c` until the
 contract is restored.
 
 `compare` and `compare-matrix` always invoke portage-ng as
@@ -437,9 +430,8 @@ on the generic `name_to_label()` fallback) so matrix output stays readable.
 
 ### Filesystem layout (portage-ng repo root)
 
-`tinderbox-ng` rsyncs the on-host `portage-ng` checkout into the
-baseline at `/opt/portage-ng/`. The wrapper requires the following at
-the repo root:
+`tinderbox-ng` git-clones `portage-ng` from GitHub into the baseline at
+`/opt/portage-ng/`. The wrapper requires the following at the repo root:
 
 - `portage-ng.pl` — project entry point (used as `swipl -f`).
 - `Source/loader.pl` — module loader (alternative repo marker).
@@ -448,17 +440,17 @@ the repo root:
 - `Source/Knowledge/Sets/world/<hostname>` — world file (created empty
   by bootstrap if missing).
 
-The following gitignored paths must NOT be deleted by `refresh-portage-ng`
-(they are produced inside the baseline by `--sync`/runtime and are not
-in the source repo):
+The following gitignored paths are produced inside the baseline by
+`--sync`/runtime and are not in the source repo:
 
 - `Knowledge/{kb.qlf, kb.raw, profile.qlf, profile.raw, embeddings.pl,
   phase_stats.pl, resume.pl}`
 - `Source/{Snapshots, Certificates, Private}/`
 - `Source/Knowledge/Sets/**/*.local`
 
-The rsync exclude list in `bin/tinderbox-ng` (function
-`cmd_refresh_portage_ng`) is the canonical encoding of this rule.
+`refresh-portage-ng` updates the clone with `git fetch` + `reset --hard`,
+which only rewrites tracked files — so these untracked, gitignored
+artefacts survive untouched without any explicit exclude list.
 
 ## Side-by-side comparison: portage-ng vs emerge
 
@@ -942,10 +934,8 @@ ships a particular `kb.qlf`, the resolver disagrees with `emerge`.
 | `GENTOO_RELENG_KEY` | `0xBB572E0E2D182910` | Release-engineering key fingerprint. |
 | `PORTAGE_TREE_URL` | `https://github.com/gentoo-mirror/gentoo.git` | Tree source. |
 | `PORTAGE_TREE_PIN` | (latest) | Pin to a specific commit at bootstrap. |
-| `PORTAGE_NG_URL` | (unset) | If set: `git clone`; else rsync from `PORTAGE_NG_LOCAL`. |
-| `PORTAGE_NG_LOCAL` | `$PORTAGE_NG_CLONE` (`/usr/local/share/portage-ng`), else `/root/prolog`, `/opt/prolog` | Host portage-ng checkout; seeds `baseline/opt/portage-ng`. Same as AWS `PORTAGE_NG_CLONE`. |
-| `PORTAGE_NG_CLONE` | `/usr/local/share/portage-ng` | Default host git checkout path (`contrib/ami-tinder.sh`). |
-| `PORTAGE_NG_REF` | `HEAD` | Ref to check out (only if `PORTAGE_NG_URL` set). Pin to `4ba5099c` (or later) for issue #80 binpkg perf + prior VDB/binpkg-refresh fixes. |
+| `PORTAGE_NG_URL` | `https://github.com/pvdabeel/portage-ng.git` | portage-ng git URL `git clone`d straight into `baseline/opt/portage-ng` (no host checkout, no rsync). |
+| `PORTAGE_NG_REF` | `master` | Ref to deploy. Pin to `4ba5099c` (or later) for issue #80 binpkg perf + prior VDB/binpkg-refresh fixes. |
 | `GENTOO_PROFILE` | `default/linux/amd64/23.0/split-usr/no-multilib` | Must match `config:gentoo_profile/1`. |
 | `GENTOO_LOCALE` | `en_US.UTF-8 UTF-8` | Appended to `/etc/locale.gen`. |
 | `GENTOO_LOCALE_NAME` | `en_US.utf8` | Argument to `eselect locale set`. |

@@ -30,7 +30,6 @@ TINDERBOX_NG_REF="${TINDERBOX_NG_REF:-main}"
 PORTAGE_NG_REF="${PORTAGE_NG_REF:-master}"
 TINDERBOX_ROOT="${TINDERBOX_ROOT:-/srv/tinderbox-ng}"
 TINDERBOX_INSTALL="${TINDERBOX_INSTALL:-/usr/local/share/tinderbox-ng}"
-PORTAGE_NG_CLONE="${PORTAGE_NG_CLONE:-/usr/local/share/portage-ng}"
 TINDERBOX_ENTRY="${TINDERBOX_ENTRY:-/usr/local/sbin/tinderbox-ng}"
 COMPARE_MATRIX="${COMPARE_MATRIX:-/usr/local/bin/compare-matrix}"
 SHARE_DIR="${TINDERBOX_INSTALL}/share/tinderbox-ng"
@@ -109,29 +108,6 @@ _auto_profile() {
   esac
 }
 
-# portage-ng config.pl requires Source/Config/Private/{passwords,api_key}.pl
-# (gitignored; templates ship in-repo). Stub before bootstrap rsync.
-_ensure_portage_ng_private_config() {
-  local png_root="$1"
-  local priv="$png_root/Source/Config/Private"
-  local pair dst tpl
-
-  [[ -d "$png_root" ]] || return 0
-  install -d "$priv"
-  for pair in api_key passwords; do
-    dst="$priv/${pair}.pl"
-    tpl="$priv/template_${pair}.pl"
-    [[ -f "$dst" ]] && continue
-    if [[ -f "$tpl" ]]; then
-      cp "$tpl" "$dst"
-      _log "stub $dst (from template)"
-    else
-      : >"$dst"
-      _log "stub $dst (empty; template missing)"
-    fi
-  done
-}
-
 _clone_repo() {
   local url="$1" dest="$2" ref="$3"
   _log "clone $url -> $dest @ $ref"
@@ -153,9 +129,10 @@ _clone_repo() {
 }
 
 _install_tinderbox_ng() {
+  # Only the tinderbox-ng tool is cloned on the host. portage-ng is
+  # git-deployed straight into the baseline by `tinderbox-ng bootstrap`
+  # (PORTAGE_NG_URL @ PORTAGE_NG_REF) -- no on-host portage-ng checkout.
   _clone_repo "$TINDERBOX_NG_URL" "$TINDERBOX_INSTALL" "$TINDERBOX_NG_REF"
-  _clone_repo "$PORTAGE_NG_URL" "$PORTAGE_NG_CLONE" "$PORTAGE_NG_REF"
-  _ensure_portage_ng_private_config "$PORTAGE_NG_CLONE"
 
   install -d /usr/local/sbin /usr/local/bin
   ln -sfn "$TINDERBOX_INSTALL/bin/tinderbox-ng" "$TINDERBOX_ENTRY"
@@ -236,9 +213,8 @@ main() {
   fi
 
   _install_tinderbox_ng
-  # Bootstrap rsyncs from PORTAGE_NG_LOCAL; empty URL avoids git-clone path.
-  export PORTAGE_NG_LOCAL="$PORTAGE_NG_CLONE"
-  export PORTAGE_NG_URL=
+  # Bootstrap git-clones portage-ng straight from GitHub into the baseline.
+  export PORTAGE_NG_URL PORTAGE_NG_REF
 
   _mount_tmpfs "$TINDER_TMPFS_SIZE"
 

@@ -49,33 +49,14 @@ GENTOO_RELENG_KEY="${GENTOO_RELENG_KEY:-0xBB572E0E2D182910}"
 PORTAGE_TREE_URL="${PORTAGE_TREE_URL:-https://github.com/gentoo-mirror/gentoo.git}"
 PORTAGE_TREE_PIN="${PORTAGE_TREE_PIN:-}"
 
-# portage-ng repo. PORTAGE_NG_URL (git clone) takes precedence; otherwise
-# the script rsyncs from PORTAGE_NG_LOCAL into the baseline. Since
-# tinderbox-ng now lives in its own repository, there is no in-tree
-# auto-detection: PORTAGE_NG_URL or PORTAGE_NG_LOCAL must be set
-# explicitly, or PORTAGE_NG_CLONE (/usr/local/share/portage-ng, same as
-# contrib/ami-tinder.sh) or a legacy path must exist on the host. doctor
-# surfaces a missing setting as an error before bootstrap touches anything.
+# portage-ng repo. tinderbox-ng always deploys portage-ng straight from
+# GitHub: `bootstrap` git-clones PORTAGE_NG_URL @ PORTAGE_NG_REF into the
+# baseline, and `refresh-portage-ng` git-fetches + `reset --hard`s it in
+# place. There is NO host-side checkout and NO rsync -- the baseline's
+# /opt/portage-ng IS the clone. Override PORTAGE_NG_URL / PORTAGE_NG_REF to
+# track a fork or pin a ref.
 SCRIPT_PATH="$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
-
-_pn_is_repo() {
-  # portage-ng.pl is the project entry point at the repo root.
-  # Source/loader.pl is the module loader. Either marker is sufficient.
-  [[ -f "$1/portage-ng.pl" ]] || [[ -f "$1/Source/loader.pl" ]]
-}
-
-# Host-side portage-ng git checkout (mirrors contrib/ami-tinder.sh PORTAGE_NG_CLONE).
-PORTAGE_NG_CLONE="${PORTAGE_NG_CLONE:-/usr/local/share/portage-ng}"
-
-_pn_autodetect() {
-  # Same single host path as contrib/ami-tinder.sh (no /opt/portage-ng on host).
-  if _pn_is_repo "$PORTAGE_NG_CLONE"; then
-    printf '%s' "$PORTAGE_NG_CLONE"
-    return
-  fi
-  printf ''
-}
 
 _pn_binpkg_exec_pl() {
   printf '%s/%s' "$1" "$PN_BINPKG_EXEC_REL"
@@ -106,12 +87,10 @@ _pn_portage_ng_cmd() {
     "$to" "$mode_flag" "$*"
 }
 
-PORTAGE_NG_URL="${PORTAGE_NG_URL:-}"
-PORTAGE_NG_LOCAL="${PORTAGE_NG_LOCAL:-$(_pn_autodetect)}"
-PORTAGE_NG_REF="${PORTAGE_NG_REF:-HEAD}"
+PORTAGE_NG_URL="${PORTAGE_NG_URL:-https://github.com/pvdabeel/portage-ng.git}"
+PORTAGE_NG_REF="${PORTAGE_NG_REF:-master}"
 # portage-ng issue #80: mtime-gated binpkg index refresh + in-memory
-# self-inject. doctor warns when baseline/host checkout predates this.
-PORTAGE_NG_MIN_ISSUE80_COMMIT="${PORTAGE_NG_MIN_ISSUE80_COMMIT:-4ba5099c}"
+# self-inject. doctor warns when the baseline clone predates this.
 PN_BINPKG_EXEC_REL="Source/Domain/Gentoo/Binpkg/binpkg_exec.pl"
 
 # Library + share directories. The canonical layout is "the repo, copied
@@ -245,7 +224,7 @@ require_dirs() {
 # Required host-side binaries. Bash 5 syntax; tested at startup of cmd_doctor.
 TINDERBOX_REQUIRED_BINS=(
   bash mount umount findmnt flock unshare modprobe
-  curl git rsync tar gpg gpgconf sha512sum sed awk grep
+  curl git tar gpg gpgconf sha512sum sed awk grep
   install ln chmod chown stat install rmdir
 )
 
@@ -710,7 +689,7 @@ cmd_doctor() {
   done
   if (( ${#missing_req[@]} > 0 )); then
     log_error "missing required commands: ${missing_req[*]}"
-    log_error "  install via: emerge sys-apps/util-linux app-crypt/gnupg net-misc/curl dev-vcs/git net-misc/rsync app-arch/tar"
+    log_error "  install via: emerge sys-apps/util-linux app-crypt/gnupg net-misc/curl dev-vcs/git app-arch/tar"
     fail=$((fail+1))
   else
     log_ok "all required commands present"
@@ -783,33 +762,21 @@ cmd_doctor() {
     log_ok "all helpers present in $LIBEXEC_DIR"
   fi
 
-  # PORTAGE_NG_LOCAL or PORTAGE_NG_URL must point somewhere
+  # portage-ng is always git-deployed from GitHub into the baseline.
   if [[ -n "$PORTAGE_NG_URL" ]]; then
     log_ok "portage-ng source: git $PORTAGE_NG_URL @ $PORTAGE_NG_REF"
-  elif [[ -n "$PORTAGE_NG_LOCAL" ]] && _pn_is_repo "$PORTAGE_NG_LOCAL"; then
-    log_ok "portage-ng source: rsync from $PORTAGE_NG_LOCAL"
   else
-    log_error "no portage-ng source found"
-    log_error "  tried: \$PORTAGE_NG_LOCAL=${PORTAGE_NG_LOCAL:-(unset)}, plus auto-detect of"
-    log_error "  \$PORTAGE_NG_CLONE=${PORTAGE_NG_CLONE} (run contrib/deploy-host.sh to git-clone it)."
-    log_error "  Set PORTAGE_NG_LOCAL=/path/to/portage-ng (must contain portage-ng.pl"
-    log_error "  at the root or Source/loader.pl) or PORTAGE_NG_URL=https://... PORTAGE_NG_REF=<ref>."
+    log_error "PORTAGE_NG_URL is empty; set it to a portage-ng git URL"
+    log_error "  (default https://github.com/pvdabeel/portage-ng.git)."
     fail=$((fail+1))
   fi
 
   # portage-ng#80: mtime-gated binpkg refresh (ensure_index_fresh/0).
-  if [[ -n "$PORTAGE_NG_LOCAL" ]] && _pn_has_ensure_index_fresh "$PORTAGE_NG_LOCAL"; then
-    log_ok "host portage-ng checkout has binpkg ensure_index_fresh (issue #80)"
-  elif [[ -n "$PORTAGE_NG_LOCAL" ]] && [[ -f "$(_pn_binpkg_exec_pl "$PORTAGE_NG_LOCAL")" ]]; then
-    log_warn "host portage-ng checkout predates issue #80 (no ensure_index_fresh in binpkg_exec.pl)"
-    log_warn "  update the host checkout to >= $PORTAGE_NG_MIN_ISSUE80_COMMIT, then refresh-portage-ng"
-    warn=$((warn+1))
-  fi
   if [[ -d "$BASELINE_DIR$CHROOT_PORTAGE_NG" ]]; then
     if _pn_has_ensure_index_fresh "$BASELINE_DIR$CHROOT_PORTAGE_NG"; then
       log_ok "baseline portage-ng has binpkg ensure_index_fresh (issue #80)"
     else
-      log_warn "baseline portage-ng predates issue #80; run refresh-portage-ng after updating the host checkout"
+      log_warn "baseline portage-ng predates issue #80; run refresh-portage-ng"
       warn=$((warn+1))
     fi
   fi
@@ -1552,7 +1519,7 @@ EOF
 
 # portage-ng's config.pl consults Source/Config/Private/{passwords,api_key}.pl.
 # Those files are gitignored (only template_*.pl ships in the repo). Fresh
-# git clones / rsyncs therefore fail kb load until the stubs exist. Copy from
+# git clones therefore fail kb load until the stubs exist. Copy from
 # the shipped templates with empty credentials — fine for tinderbox-ng compare
 # runs that do not use digest auth or LLM keys.
 _ensure_portage_ng_private_config() {
@@ -1580,23 +1547,13 @@ _ensure_portage_ng_private_config() {
 bootstrap_install_portage_ng() {
   log_info "installing portage-ng into baseline at $CHROOT_PORTAGE_NG"
 
-  [[ -z "$PORTAGE_NG_URL" && -n "$PORTAGE_NG_LOCAL" ]] \
-    && _ensure_portage_ng_private_config "$PORTAGE_NG_LOCAL"
-
-  if [[ -n "$PORTAGE_NG_URL" ]]; then
-    in_baseline_chroot bash -e <<EOF
+  [[ -n "$PORTAGE_NG_URL" ]] || die "PORTAGE_NG_URL is empty; cannot git-clone portage-ng"
+  log_info "git clone $PORTAGE_NG_URL @ $PORTAGE_NG_REF"
+  in_baseline_chroot bash -e <<EOF
 . /etc/profile
 git clone "$PORTAGE_NG_URL" "$CHROOT_PORTAGE_NG"
 git -C "$CHROOT_PORTAGE_NG" checkout "$PORTAGE_NG_REF"
 EOF
-  else
-    [[ -d "$PORTAGE_NG_LOCAL" ]] || die "PORTAGE_NG_LOCAL=$PORTAGE_NG_LOCAL is not a directory"
-    log_info "rsync from $PORTAGE_NG_LOCAL"
-    rsync -a --delete \
-          --exclude='.git/objects/pack/*.idx.lock' \
-          --exclude='Source/Snapshots/' \
-          "$PORTAGE_NG_LOCAL/" "$BASELINE_DIR$CHROOT_PORTAGE_NG/"
-  fi
 
   _ensure_portage_ng_private_config "$BASELINE_DIR$CHROOT_PORTAGE_NG"
 
@@ -1637,7 +1594,7 @@ EOF
 # instead of the repo-level config.pl, so:
 #   - upstream portage-ng users keep the conservative `manual` default
 #   - tinderbox-ng owns the policy bump on the boxes it deploys
-#   - re-running refresh-portage-ng (which rsyncs all of Source/) just
+#   - re-running refresh-portage-ng (which git-resets all of Source/) just
 #     overwrites the file with the upstream copy and we re-apply here
 #
 # Predicate semantics: `config:binpkg_refresh/1` is loaded as a single
@@ -1698,7 +1655,7 @@ _patch_portage_ng_host_config() {
   # circuit source builds because portage-ng's binpkg repository is empty.
   #
   # The deploy fix is to swap the host-form paths for the in-chroot form
-  # in the host config. We patch the deployed copy (post-rsync) rather
+  # in the host config. We patch the deployed copy (post-deploy) rather
   # than upstream so portage-ng-core stays generic; the contract that
   # tinderbox-ng owns the in-chroot mount layout is already documented.
   #
@@ -1842,14 +1799,14 @@ EOF
 # =============================================================================
 #
 # Re-deploy the portage-ng source tree into the baseline. Mirrors what
-# bootstrap_install_portage_ng does: rsync from $PORTAGE_NG_LOCAL (or
-# git clone $PORTAGE_NG_URL) into $BASELINE_DIR$CHROOT_PORTAGE_NG, then
-# refresh the in-baseline /usr/local/bin/portage-ng-dev shim and the
-# tinderbox-matrix helper.
+# bootstrap_install_portage_ng does: git fetch + reset --hard
+# origin/$PORTAGE_NG_REF on $BASELINE_DIR$CHROOT_PORTAGE_NG (from
+# $PORTAGE_NG_URL), then refresh the in-baseline
+# /usr/local/bin/portage-ng-dev shim and the tinderbox-matrix helper.
 #
-# Use this whenever the host-side checkout has commits the baseline
-# doesn't yet ship: every fresh session bind-mounts the baseline copy,
-# so without this step new sessions keep running yesterday's resolver.
+# Use this whenever GitHub has commits the baseline doesn't yet ship:
+# every fresh session bind-mounts the baseline copy, so without this step
+# new sessions keep running yesterday's resolver.
 #
 # kb.qlf is NOT regenerated here -- only Source/ is replaced. Run
 # `tinderbox-ng refresh-kb` separately if you also want to re-parse
@@ -1863,45 +1820,23 @@ cmd_refresh_portage_ng() {
   [[ -d "$BASELINE_DIR$CHROOT_PORTAGE_NG" ]] \
     || die "no portage-ng in baseline at $BASELINE_DIR$CHROOT_PORTAGE_NG; run bootstrap first"
 
-  if [[ -n "$PORTAGE_NG_URL" ]]; then
-    log_info "git pull from $PORTAGE_NG_URL inside baseline"
-    in_baseline_chroot bash -e <<EOF
+  [[ -n "$PORTAGE_NG_URL" ]] || die "PORTAGE_NG_URL is empty; cannot git-fetch portage-ng"
+  # git fetch + reset --hard from GitHub. `reset --hard` only touches tracked
+  # files, so the gitignored, baseline-internal Knowledge artefacts (kb.qlf,
+  # embeddings.pl, phase_stats.pl, ...), Source/{Certificates,Private}/ and
+  # the per-host world *.local files survive untouched -- no rsync excludes
+  # needed. Source/Config/<host>.pl IS tracked and gets reset; we re-apply the
+  # tinderbox-ng policy overrides right after via _patch_portage_ng_host_config.
+  log_info "git fetch + reset --hard origin/$PORTAGE_NG_REF inside baseline ($PORTAGE_NG_URL)"
+  in_baseline_chroot bash -e <<EOF
 . /etc/profile
 cd "$CHROOT_PORTAGE_NG"
+git remote set-url origin "$PORTAGE_NG_URL" 2>/dev/null || git remote add origin "$PORTAGE_NG_URL"
 git fetch origin
-git checkout "$PORTAGE_NG_REF"
+git checkout "$PORTAGE_NG_REF" 2>/dev/null || git checkout -B "$PORTAGE_NG_REF" "origin/$PORTAGE_NG_REF"
 git reset --hard "origin/$PORTAGE_NG_REF" || git reset --hard "$PORTAGE_NG_REF"
 EOF
-  else
-    [[ -d "$PORTAGE_NG_LOCAL" ]] || die "PORTAGE_NG_LOCAL=$PORTAGE_NG_LOCAL is not a directory"
-    log_info "rsync from $PORTAGE_NG_LOCAL"
-    # --delete on the source tree must NOT wipe in-baseline build artefacts
-    # that the host checkout never has (Knowledge/kb.qlf etc. are gitignored;
-    # vm-linux.local world file is created by bootstrap; Certificates/ and
-    # Private/ are VM-specific). Without these excludes, refresh-portage-ng
-    # silently destroys kb.qlf and the next session takes 10+ minutes to
-    # re-parse the whole tree from md5-cache. The exclude paths mirror the
-    # repository's .gitignore exactly: Knowledge/ and Source/Certificates/ +
-    # Source/Private/ live at repository roots, NOT under Source/Knowledge/.
-    [[ -n "$PORTAGE_NG_LOCAL" ]] && _ensure_portage_ng_private_config "$PORTAGE_NG_LOCAL"
-    rsync -a --delete \
-          --exclude='.git/objects/pack/*.idx.lock' \
-          --exclude='Source/Snapshots/' \
-          --exclude='Source/Certificates/' \
-          --exclude='Source/Private/' \
-          --exclude='Source/Config/Private/passwords.pl' \
-          --exclude='Source/Config/Private/api_key.pl' \
-          --exclude='Knowledge/kb.qlf' \
-          --exclude='Knowledge/kb.raw' \
-          --exclude='Knowledge/profile.qlf' \
-          --exclude='Knowledge/profile.raw' \
-          --exclude='Knowledge/embeddings.pl' \
-          --exclude='Knowledge/phase_stats.pl' \
-          --exclude='Knowledge/resume.pl' \
-          --exclude='Source/Knowledge/Sets/**/*.local' \
-          "$PORTAGE_NG_LOCAL/" "$BASELINE_DIR$CHROOT_PORTAGE_NG/"
-    _ensure_portage_ng_private_config "$BASELINE_DIR$CHROOT_PORTAGE_NG"
-  fi
+  _ensure_portage_ng_private_config "$BASELINE_DIR$CHROOT_PORTAGE_NG"
 
   log_info "refreshing in-baseline portage-ng-dev shim and tinderbox-matrix helper"
   install -m 0755 "$SHARE_DIR/portage-ng-dev.in" "$BASELINE_DIR/usr/local/bin/portage-ng-dev"
@@ -1918,10 +1853,9 @@ EOF
     : >"$BASELINE_DIR$CHROOT_PORTAGE_NG/Source/Knowledge/Sets/world/vm-linux.local"
   fi
 
-  # The rsync above re-overwrites Source/Config/<host>.pl with whatever
-  # is in the upstream checkout, dropping any tinderbox-ng-owned policy
-  # overrides (notably config:binpkg_refresh(mtime), required for the
-  # matrix runner). Re-apply.
+  # The git reset --hard above restores the upstream Source/Config/<host>.pl,
+  # dropping any tinderbox-ng-owned policy overrides (notably
+  # config:binpkg_refresh(mtime), required for the matrix runner). Re-apply.
   _patch_portage_ng_host_config
 
   log_ok "portage-ng refreshed in baseline; new sessions will pick it up"
@@ -1929,7 +1863,7 @@ EOF
   if [[ ! -f "$BASELINE_DIR$CHROOT_PORTAGE_NG/Knowledge/kb.qlf" ]]; then
     log_warn "kb.qlf MISSING from baseline; run 'tinderbox-ng refresh-kb' to (re)generate it"
   else
-    log_info "kb.qlf preserved (was not in source rsync); run 'refresh-kb' if parser/grammar changed"
+    log_info "kb.qlf preserved (gitignored; untouched by reset --hard); run 'refresh-kb' if parser/grammar changed"
   fi
 }
 
@@ -4825,7 +4759,8 @@ Subcommands:
   refresh-kb               Regenerate kb.qlf inside baseline against the pinned
                            tree (requires baseline to be unfrozen briefly).
   refresh-portage-ng       Re-deploy the portage-ng source tree into the
-                           baseline from PORTAGE_NG_LOCAL (or PORTAGE_NG_URL).
+                           baseline via git fetch + reset --hard from
+                           PORTAGE_NG_URL @ PORTAGE_NG_REF (GitHub).
                            Does NOT regenerate kb.qlf.
   install-ccache           Retrofit dev-util/ccache + /etc/ccache.conf into an
                            existing baseline (or bump max_size). Idempotent.
@@ -4978,13 +4913,10 @@ Environment:
   STAGE3_VARIANT                  e.g. amd64-openrc (default).
   PORTAGE_TREE_URL                Default https://github.com/gentoo-mirror/gentoo.git
   PORTAGE_TREE_PIN                Optional commit to pin during bootstrap.
-  PORTAGE_NG_URL                  If set: git clone. Otherwise rsync PORTAGE_NG_LOCAL.
-  PORTAGE_NG_LOCAL                Host checkout to seed baseline (default: /usr/local/share/portage-ng).
-  PORTAGE_NG_CLONE                Same default path as ami-tinder.sh (override if needed).
-  PORTAGE_NG_REF                  Git ref when PORTAGE_NG_URL is set (default HEAD).
+  PORTAGE_NG_URL                  portage-ng git URL cloned into the baseline
+                                  (default https://github.com/pvdabeel/portage-ng.git).
+  PORTAGE_NG_REF                  Git ref to deploy (default master).
                                   Pin to 4ba5099c+ for issue #80 binpkg perf.
-  PORTAGE_NG_MIN_ISSUE80_COMMIT   Commit doctor uses for issue #80 warnings
-                                  (default 4ba5099c).
   TINDERBOX_REBOOTSTRAP=1         Allow `bootstrap` to overwrite an existing baseline.
 
 See README.md in this repository for deployment notes.

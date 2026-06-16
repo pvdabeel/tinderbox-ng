@@ -112,12 +112,18 @@ write\-protect for the duration of the rebuild.
 .B refresh\-portage\-ng
 Re\-deploy the
 .B portage\-ng
-source tree into the baseline from
-.B PORTAGE_NG_LOCAL
-(or
-.BR PORTAGE_NG_URL ).
-Excludes baseline\-internal Knowledge artefacts (see
-.BR FILES ).
+source tree into the baseline via
+.B git fetch
++
+.B reset \-\-hard
+from
+.B PORTAGE_NG_URL
+@
+.BR PORTAGE_NG_REF .
+The reset only touches tracked files, so baseline\-internal Knowledge
+artefacts (see
+.BR FILES )
+survive untouched.
 Does NOT regenerate
 .IR kb.qlf .
 .TP
@@ -828,49 +834,29 @@ Optional commit to pin during
 .BR bootstrap .
 .TP
 .B PORTAGE_NG_URL
-If set,
+The
+.B portage\-ng
+git URL that
 .B bootstrap
 .BR git-clone (1)s
-the
-.B portage\-ng
-source from this URL. Otherwise
-.BR rsync (1)s
-from
-.BR PORTAGE_NG_LOCAL .
-.TP
-.B PORTAGE_NG_LOCAL
-Local
-.B portage\-ng
-checkout on the host (default
-.IR /usr/local/share/portage-ng ,
-same as AWS
-.BR PORTAGE_NG_CLONE ).
-Seeds
+straight into
 .IR baseline/opt/portage-ng
 (in\-chroot
 .IR /opt/portage-ng ).
-Auto\-detected from
-.BR PORTAGE_NG_CLONE ,
-.IR /root/prolog ,
-.I /opt/prolog
-when unset.
+There is no host\-side checkout and no
+.BR rsync (1).
+Default
+.IR https://github.com/pvdabeel/portage-ng.git .
 .TP
 .B PORTAGE_NG_REF
-Git ref to check out from the
+Git ref to deploy from the
 .B portage\-ng
 clone (default
-.BR HEAD ).
+.BR master ).
 Pin to
 .B 4ba5099c
 (or later) for portage\-ng issue #80 binpkg index perf plus prior
 binpkg\-refresh and VDB\-reconciliation fixes.
-.TP
-.B PORTAGE_NG_MIN_ISSUE80_COMMIT
-Commit id
-.B doctor
-uses when warning that the host or baseline checkout predates issue #80
-(default
-.BR 4ba5099c ).
 .
 .SH EXIT STATUS
 .TP
@@ -1096,8 +1082,7 @@ and matrix logs under
 .BR overlayfs (5),
 .BR chroot (1),
 .BR ccache (1),
-.BR git (1),
-.BR rsync (1)
+.BR git (1)
 .PP
 .B portage\-ng
 project: <\fIhttps://github.com/pvdabeel/portage-ng\fR>.

@@ -72,12 +72,13 @@ exactly one home, decided by *who runs it and why*.
   `/usr/local/share/man/man8/tinderbox-ng.8` (symlinked by
   `deploy-host.sh`). When you add or change a subcommand / flag /
   env var, update this file too — it's the canonical user reference.
-- `contrib/`: dev-machine helpers. Never deployed to the VM
-  (`deploy-host.sh`'s rsync excludes `/contrib`).
-  - `deploy-host.sh` (~200 lines): one-shot host install. `rsync`s
-    `bin/`, `libexec/`, `share/` onto a remote VM, symlinks the entry
-    point + manpage, runs `doctor`, optionally `bootstrap` +
-    `selftest`. Idempotent; safe to re-run.
+- `contrib/`: dev-machine helpers. Never run on the VM.
+  - `deploy-host.sh` (~200 lines): one-shot host install. `git clone`s
+    /`git fetch`es tinderbox-ng from GitHub (`TINDERBOX_NG_URL`) onto a
+    remote VM, symlinks the entry point + manpage, runs `doctor`,
+    optionally `bootstrap` + `selftest`. portage-ng is git-deployed into
+    the baseline (never installed on the host). No rsync. Idempotent;
+    safe to re-run.
   - `deploy-baseline.sh`: safe scp of a single template with `@-token`
     substitution (use this instead of raw `scp` to avoid leaving
     literal `@NPROC@` in `make.conf`).
@@ -426,11 +427,12 @@ and a populated baseline. Test those on the VM (see below).
 The canonical test target is `vm-linux.local` (a Linux VM with a
 fully bootstrapped baseline at `/srv/tinderbox-ng/`). Workflow:
 
-1. Edit on macOS.
-2. Push: `contrib/deploy-host.sh root@vm-linux.local`. This rsyncs
-   `bin/`, `libexec/`, `share/` to `/usr/local/share/tinderbox-ng/`,
-   re-symlinks `/usr/local/sbin/tinderbox-ng` and the manpage, runs
-   `doctor`.
+1. Edit on macOS, then commit + push to GitHub (deploy is git-only now;
+   there is no rsync of a local checkout).
+2. Roll out: `contrib/deploy-host.sh root@vm-linux.local`. This
+   `git clone`s/`git fetch`es tinderbox-ng into
+   `/usr/local/share/tinderbox-ng/`, re-symlinks
+   `/usr/local/sbin/tinderbox-ng` and the manpage, runs `doctor`.
 3. Quick remote checks:
    ```sh
    ssh root@vm-linux.local tinderbox-ng <subcmd> --help
@@ -553,8 +555,9 @@ the short version:
   source repo: `Knowledge/{kb.qlf, kb.raw, profile.qlf, profile.raw,
   embeddings.pl, phase_stats.pl, resume.pl}`,
   `Source/{Snapshots, Certificates, Private}/`,
-  `Source/Knowledge/Sets/**/*.local`. The rsync exclude list inside
-  `cmd_refresh_portage_ng` is the canonical encoding.
+  `Source/Knowledge/Sets/**/*.local`. They are gitignored, so the
+  `git fetch` + `reset --hard` in `cmd_refresh_portage_ng` (which only
+  rewrites tracked files) leaves them untouched — no exclude list needed.
 
 
 ## Development flow

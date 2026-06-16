@@ -7,20 +7,20 @@
 # onto $PATH / $MANPATH, runs `tinderbox-ng doctor` to confirm prerequisites,
 # and (optionally) kicks off `bootstrap` followed by `selftest`.
 #
-# Default install source is git (same model as contrib/ami-tinder.sh on AWS):
-# both tinderbox-ng and portage-ng are cloned/updated on the remote from
-# GitHub. Use --from-local to rsync your dev checkout instead (uncommitted
-# changes, offline work).
+# Everything is deployed straight from GitHub (same model as
+# contrib/ami-tinder.sh on AWS): the tinderbox-ng tool is git-cloned/updated on
+# the remote from TINDERBOX_NG_URL, and portage-ng is git-deployed into the
+# baseline by `tinderbox-ng bootstrap` / `refresh-portage-ng` (PORTAGE_NG_URL @
+# PORTAGE_NG_REF). There is no rsync and no on-host portage-ng checkout. Commit
+# and push your work, then re-run this to roll it out.
 #
 # This script lives under contrib/ because it runs on the dev machine, never
-# on the VM. The rsync step explicitly excludes /contrib so the dev-side
-# helpers never get pushed to the install prefix.
+# on the VM.
 #
 # Usage:
 #   ./contrib/deploy-host.sh user@vm-host                    # git pull + doctor
 #   ./contrib/deploy-host.sh --bootstrap user@vm-host        # + bootstrap + selftest
 #   ./contrib/deploy-host.sh --refresh-portage-ng user@vm-host
-#   ./contrib/deploy-host.sh --from-local user@vm-host       # rsync dev tree
 #
 # Idempotent. Safe to re-run after upstream git updates.
 
@@ -30,29 +30,25 @@ usage() {
   cat <<'USAGE'
 Usage: deploy-host.sh [options] user@vm-host
 
-Install source (default: git, like AWS ami-tinder):
-  (default)              Clone/update tinderbox-ng and portage-ng on the remote
-                         from GitHub (TINDERBOX_NG_URL / PORTAGE_NG_URL).
-  --from-local           Rsync bin/, libexec/, share/ from this dev checkout
-                         instead (no remote git for tinderbox-ng; portage-ng
-                         still uses PORTAGE_NG_LOCAL / autodetect unless set).
-  --git                  Same as default; explicit.
+Install: git only (like AWS ami-tinder). The tinderbox-ng tool is
+cloned/updated on the remote from TINDERBOX_NG_URL; portage-ng is git-deployed
+into the baseline by bootstrap/refresh-portage-ng (PORTAGE_NG_URL). No rsync,
+no on-host portage-ng checkout. Commit and push, then re-run to roll out.
 
 Options:
   --bootstrap            After install + doctor, run `tinderbox-ng bootstrap`
                          on the remote (long-running; ~hours). Then run
                          `tinderbox-ng selftest` to confirm the result.
   --refresh-portage-ng   After install, run `tinderbox-ng refresh-portage-ng`
-                         on the remote (rsyncs portage-ng git checkout into
-                         the baseline; does NOT regenerate kb.qlf).
+                         on the remote (git fetch + reset --hard from
+                         PORTAGE_NG_URL into the baseline; does NOT
+                         regenerate kb.qlf).
   --refresh-baseline-config
                          Re-apply share/tinderbox-ng portage templates into
                          the existing baseline without a full rebootstrap.
   --selftest             Run `tinderbox-ng selftest` after install.
   --remote-prefix DIR    tinderbox-ng install dir on remote
                          (default: /usr/local/share/tinderbox-ng).
-  --portage-ng-dir DIR   portage-ng git checkout on remote
-                         (default: PORTAGE_NG_CLONE, /usr/local/share/portage-ng).
   --link DIR             Symlink for tinderbox-ng entry point
                          (default: /usr/local/sbin/tinderbox-ng).
   -h, --help             This message.
@@ -61,8 +57,8 @@ Environment (git mode defaults match ami-tinder.sh):
   TINDERBOX_NG_URL       default https://github.com/pvdabeel/tinderbox-ng.git
   TINDERBOX_NG_REF       default main
   PORTAGE_NG_URL         default https://github.com/pvdabeel/portage-ng.git
+                         (cloned into the baseline, not the host)
   PORTAGE_NG_REF         default master
-  PORTAGE_NG_LOCAL       set automatically to --portage-ng-dir in git mode
 
 Also forwarded: TINDERBOX_CCACHE_MAX_SIZE, TINDERBOX_SESSIONS_TMPFS_SIZE,
 STAGE3_*, PORTAGE_TREE_PIN, GENTOO_PROFILE, TINDERBOX_REBOOTSTRAP, ...
@@ -75,22 +71,15 @@ Examples:
   # First-time bootstrap:
   TINDERBOX_BOOTSTRAP_SELFTEST=1 \
     ./contrib/deploy-host.sh --bootstrap root@vm-linux.local
-
-  # Push uncommitted tinderbox-ng work from laptop:
-  ./contrib/deploy-host.sh --from-local root@vm-linux.local
 USAGE
 }
 
 # Defaults
-INSTALL_SOURCE=git
 DO_BOOTSTRAP=0
 DO_REFRESH_PNG=0
 DO_REFRESH_BASELINE_CONFIG=0
 DO_SELFTEST=0
 REMOTE_PREFIX=/usr/local/share/tinderbox-ng
-# Host portage-ng checkout (same variable name as contrib/ami-tinder.sh).
-PORTAGE_NG_CLONE="${PORTAGE_NG_CLONE:-/usr/local/share/portage-ng}"
-REMOTE_PORTAGE_NG="${REMOTE_PORTAGE_NG:-$PORTAGE_NG_CLONE}"
 REMOTE_LINK=/usr/local/sbin/tinderbox-ng
 REMOTE_COMPARE_MATRIX_LINK=/usr/local/sbin/compare-matrix
 TINDERBOX_NG_URL="${TINDERBOX_NG_URL:-https://github.com/pvdabeel/tinderbox-ng.git}"
@@ -101,14 +90,11 @@ REMOTE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --git)                INSTALL_SOURCE=git; shift ;;
-    --from-local)         INSTALL_SOURCE=local; shift ;;
     --bootstrap)          DO_BOOTSTRAP=1; shift ;;
     --refresh-portage-ng) DO_REFRESH_PNG=1; shift ;;
     --refresh-baseline-config) DO_REFRESH_BASELINE_CONFIG=1; shift ;;
     --selftest)           DO_SELFTEST=1; shift ;;
     --remote-prefix)      REMOTE_PREFIX="$2"; shift 2 ;;
-    --portage-ng-dir)     REMOTE_PORTAGE_NG="$2"; shift 2 ;;
     --link)               REMOTE_LINK="$2"; shift 2 ;;
     -h|--help)            usage; exit 0 ;;
     --)                   shift; break ;;
@@ -125,25 +111,12 @@ done
 
 [[ -n "$REMOTE" ]] || { usage >&2; echo >&2; echo "error: missing user@vm-host" >&2; exit 2; }
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
-
-if [[ "$INSTALL_SOURCE" == local ]]; then
-  [[ -f "$REPO_ROOT/bin/tinderbox-ng" ]] \
-    || { echo "error: $REPO_ROOT/bin/tinderbox-ng not found" >&2; exit 2; }
-  [[ -d "$REPO_ROOT/share/tinderbox-ng" ]] \
-    || { echo "error: $REPO_ROOT/share/tinderbox-ng not found" >&2; exit 2; }
-  [[ -d "$REPO_ROOT/libexec/tinderbox-ng" ]] \
-    || { echo "error: $REPO_ROOT/libexec/tinderbox-ng not found" >&2; exit 2; }
-fi
-
-# Git deploy: bootstrap/refresh rsync from the on-host clone (not git inside
-# the baseline), matching ami-tinder.sh. Clear PORTAGE_NG_URL for tinderbox-ng
-# only; remote clone still uses PORTAGE_NG_GIT_URL.
-if [[ "$INSTALL_SOURCE" == git ]]; then
-  export PORTAGE_NG_LOCAL="$REMOTE_PORTAGE_NG"
-  export PORTAGE_NG_URL=""
-fi
+# portage-ng is always git-deployed straight from GitHub into the baseline
+# (tinderbox-ng `bootstrap` / `refresh-portage-ng` do the clone/fetch inside
+# the chroot). There is no on-host portage-ng checkout and no rsync; just
+# forward the URL + ref the remote should track.
+export PORTAGE_NG_URL="$PORTAGE_NG_GIT_URL"
+export PORTAGE_NG_REF
 
 collect_env() {
   local v
@@ -156,7 +129,7 @@ collect_env() {
            GENTOO_PROFILE GENTOO_LOCALE GENTOO_LOCALE_NAME \
            PORTAGE_TREE_URL PORTAGE_TREE_PIN \
            TINDERBOX_NG_URL TINDERBOX_NG_REF \
-           PORTAGE_NG_URL PORTAGE_NG_REF PORTAGE_NG_LOCAL PORTAGE_NG_CLONE; do
+           PORTAGE_NG_URL PORTAGE_NG_REF; do
     if [[ -n "${!v:-}" ]]; then
       printf -v esc '%q' "${!v}"
       out+="$v=$esc "
@@ -186,10 +159,7 @@ remote_clone_repos() {
   local -a env_args=(
     "TINDERBOX_NG_URL=$(printf '%q' "$TINDERBOX_NG_URL")"
     "TINDERBOX_NG_REF=$(printf '%q' "$TINDERBOX_NG_REF")"
-    "PORTAGE_NG_URL=$(printf '%q' "$PORTAGE_NG_GIT_URL")"
-    "PORTAGE_NG_REF=$(printf '%q' "$PORTAGE_NG_REF")"
     "REMOTE_PREFIX=$(printf '%q' "$REMOTE_PREFIX")"
-    "REMOTE_PORTAGE_NG=$(printf '%q' "$REMOTE_PORTAGE_NG")"
   )
   local ssh_base=(ssh -o BatchMode=yes "$REMOTE")
   local run_clone
@@ -224,77 +194,29 @@ _clone_repo() {
   fi
 }
 
-_ensure_portage_ng_private_config() {
-  local png_root="$1"
-  local priv="$png_root/Source/Config/Private"
-  local pair dst tpl
-  [[ -d "$png_root" ]] || return 0
-  install -d "$priv"
-  for pair in api_key passwords; do
-    dst="$priv/${pair}.pl"
-    tpl="$priv/template_${pair}.pl"
-    [[ -f "$dst" ]] && continue
-    if [[ -f "$tpl" ]]; then
-      cp "$tpl" "$dst"
-      log "stub $dst (from template)"
-    else
-      : >"$dst"
-      log "stub $dst (empty; template missing)"
-    fi
-  done
-}
-
 command -v git >/dev/null 2>&1 || { log "ERROR: git not found on remote"; exit 1; }
 
-# Repos may be owned by a different uid after rsync/bootstrap; avoid
+# Repo may be owned by a different uid after a prior install; avoid
 # "dubious ownership" when root updates an existing checkout.
 git config --global --add safe.directory "$REMOTE_PREFIX" 2>/dev/null || true
-git config --global --add safe.directory "$REMOTE_PORTAGE_NG" 2>/dev/null || true
 
+# Only the tinderbox-ng tool is installed on the host. portage-ng is
+# git-deployed straight into the baseline by `tinderbox-ng bootstrap` /
+# `refresh-portage-ng`, so there is no on-host portage-ng checkout here.
 _clone_repo "$TINDERBOX_NG_URL" "$REMOTE_PREFIX" "$TINDERBOX_NG_REF"
-_clone_repo "$PORTAGE_NG_URL" "$REMOTE_PORTAGE_NG" "$PORTAGE_NG_REF"
-_ensure_portage_ng_private_config "$REMOTE_PORTAGE_NG"
-
-# Normalize ownership (prior rsync-as-user installs leave uid 1000 on the tree).
-chown -R root:root "$REMOTE_PREFIX" "$REMOTE_PORTAGE_NG"
-
-# AWS layout: host source lives only under /usr/local/share/portage-ng.
-# /opt/portage-ng exists only inside the baseline chroot after bootstrap.
-rm -rf /opt/portage-ng 2>/dev/null || true
+chown -R root:root "$REMOTE_PREFIX"
 
 log "tinderbox-ng @ $(git -C "$REMOTE_PREFIX" rev-parse --short HEAD 2>/dev/null || echo '?')"
-log "portage-ng @ $(git -C "$REMOTE_PORTAGE_NG" rev-parse --short HEAD 2>/dev/null || echo '?')"
 REMOTE_SCRIPT
 }
 
 log "remote: $REMOTE"
-log "prefix: $REMOTE_PREFIX  portage-ng: $REMOTE_PORTAGE_NG  link: $REMOTE_LINK"
-log "install source: $INSTALL_SOURCE"
+log "prefix: $REMOTE_PREFIX  link: $REMOTE_LINK"
+log "tinderbox-ng: git $TINDERBOX_NG_URL @ $TINDERBOX_NG_REF"
+log "portage-ng: git $PORTAGE_NG_URL @ $PORTAGE_NG_REF (deployed into baseline)"
 
-if [[ "$INSTALL_SOURCE" == git ]]; then
-  log "step 1/4: git clone/update tinderbox-ng + portage-ng on remote"
-  remote_clone_repos
-else
-  log "step 1/4: rsync $REPO_ROOT/ -> $REMOTE:$REMOTE_PREFIX/"
-  remote_root "install -d $(printf '%q' "$REMOTE_PREFIX")"
-
-  _rsync_excludes=(
-    --exclude '.DS_Store'
-    --exclude '__pycache__'
-    --exclude '/.git'
-    --exclude '/reports'
-    --exclude '/contrib'
-  )
-
-  rsync -a --delete "${_rsync_excludes[@]}" \
-    --rsync-path="sudo -n rsync 2>/dev/null || rsync" \
-    "$REPO_ROOT/" "$REMOTE:$REMOTE_PREFIX/" || \
-  rsync -a --delete "${_rsync_excludes[@]}" \
-    "$REPO_ROOT/" "$REMOTE:$REMOTE_PREFIX/"
-
-  log "chown root:root on $REMOTE_PREFIX (after rsync)"
-  remote_root "chown -R root:root $(printf '%q' "$REMOTE_PREFIX")"
-fi
+log "step 1/4: git clone/update tinderbox-ng on remote"
+remote_clone_repos
 
 log "step 2/4: symlink $REMOTE_LINK -> $REMOTE_PREFIX/bin/tinderbox-ng"
 remote_root "install -d $(dirname $(printf '%q' "$REMOTE_LINK")) && \
@@ -322,7 +244,7 @@ fi
 
 if (( DO_REFRESH_PNG )); then
   log "step 4/4: $REMOTE_LINK refresh-portage-ng"
-  log "  (rsyncs $REMOTE_PORTAGE_NG into baseline /opt/portage-ng)"
+  log "  (git fetch + reset --hard $PORTAGE_NG_URL into baseline /opt/portage-ng)"
   remote_root "$ENV_PREFIX $(printf '%q' "$REMOTE_LINK") refresh-portage-ng" || \
     echo "[deploy-host] refresh-portage-ng failed (baseline may not exist yet)" >&2
 fi
