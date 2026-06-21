@@ -71,6 +71,16 @@ _cm_pn_win() {
   _cm_pn_ok "$1" && ! _cm_em_ok "$2"
 }
 
+# Live status-line colouring. isatty(1) alone is too strict: drivers that
+# tee stdout (e.g. screen wrappers with `exec > >(tee log)`) still reach a
+# colour-capable terminal but compare-matrix sees a pipe on fd 1.
+_cm_use_color() {
+  [[ -n "${NO_COLOR:-}" || -n "${TINDERBOX_MATRIX_NOCOLOR:-}" ]] && return 1
+  [[ -t 1 || -n "${TINDERBOX_MATRIX_COLOR:-${CLICOLOR_FORCE:-}}" ]] && return 0
+  [[ -p /dev/fd/1 ]] && return 0
+  return 1
+}
+
 MODE="--pretend"
 LABEL_PREFIX=""
 KEEP=0
@@ -274,7 +284,7 @@ _run_one() {
   local delta_str="($vdb_delta)"
   local idx_w=${#total}
   local cm_color='' cm_rst=''
-  if [[ -t 1 ]]; then
+  if _cm_use_color; then
     if _cm_pn_regression "$pn_exit" "$em_exit"; then
       cm_color=$'\033[31m'
       cm_rst=$'\033[0m'
