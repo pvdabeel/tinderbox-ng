@@ -1,0 +1,41 @@
+---
+description: Always run long-running tinderbox-ng jobs (compare-matrix / continue) inside screen
+alwaysApply: true
+---
+
+# Run long-running tinderbox-ng jobs inside `screen`
+
+ALWAYS launch long-running drivers — `tinderbox-ng continue`,
+`compare-matrix.sh`, `tinderbox-matrix` — inside a detached `screen`
+session on the VM. NEVER use `continue --background` / `nohup setsid` for
+these.
+
+Why: a `screen` session gives a single top-level process whose tree can be
+killed cleanly in one shot. Detached/`nohup setsid` runs reparent their
+compare workers to init (`ppid=1`), so stopping them degenerates into
+pattern-killing individual build processes (`pkill -f cc1plus`, …) — which
+is error-prone and risks shooting unrelated processes.
+
+## Launch (preferred)
+
+```sh
+ssh root@vm-linux.local screen -dmS tinderbox-ng \
+    tinderbox-ng continue --jobs 16
+# reattach:
+ssh -t root@vm-linux.local screen -r tinderbox-ng
+```
+
+## Stop cleanly (one shot, no random kills)
+
+```sh
+ssh root@vm-linux.local screen -S tinderbox-ng -X quit   # kills the whole tree
+# verify:
+ssh root@vm-linux.local 'ps -eo pid,args | grep -E "compare-matrix|sbin/tinderbox-ng comp" | grep -v grep | wc -l'
+```
+
+## Never
+
+- Don't `pkill -f "<pattern that appears in your own command>"` — it
+  self-matches and kills your SSH shell.
+- Don't kill build tools (`cc1plus`, `ninja`, `emerge`, …) by name to stop a
+  run. Kill the `screen` session instead.
