@@ -22,3 +22,13 @@
 # fail (no ghc -> no haskell builds), polluting both portage-ng and
 # emerge sides of the comparison report.
 dev-lang/ghc binary
+
+# kde-plasma/xdg-desktop-portal-kde and kde-plasma/spectacle include
+# <KWaylandExtras>, a header kde-frameworks/kguiaddons only installs
+# with USE=wayland, but their ebuilds depend on kguiaddons WITHOUT a
+# [wayland] bracket (Gentoo metadata gap, portage-ng#97). Desktop
+# profiles enable USE=wayland globally so this never surfaces there; on
+# this headless/openrc baseline BOTH engines build kguiaddons -wayland
+# and the portal/spectacle compile is then guaranteed to fail. Force
+# the flag until the upstream ebuilds grow the bracketed dep.
+kde-frameworks/kguiaddons wayland
