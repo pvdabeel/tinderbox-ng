@@ -1,7 +1,12 @@
-import json, glob, os, re, gzip
+import json, glob, os, re, gzip, sys
 from collections import Counter
 
-J = "/srv/tinderbox-ng/reports/compare-matrix-20260613T162300/failfail-classified.json"
+# Consumes the JSON array written by classify-failfail.py. Pass the path (or a
+# run dir) as argv[1]; defaults to the most recent matrix run's output.
+J = sys.argv[1] if len(sys.argv) > 1 else \
+    "/srv/tinderbox-ng/reports/compare-matrix-20260621T174159/failfail-classified.json"
+if os.path.isdir(J):
+    J = os.path.join(J, "failfail-classified.json")
 rows = json.load(open(J))
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 

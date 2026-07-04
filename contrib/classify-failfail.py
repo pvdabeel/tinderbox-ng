@@ -1,31 +1,49 @@
 #!/usr/bin/env python3
-"""Classify fail/fail compare cases to surface 'portage-ng should have succeeded'.
+"""Classify fail/fail compare cases (both engines failed) into actionable buckets.
 
 For every compare-matrix wrapper *.log where BOTH engines failed, inspect the
-per-package compare logdir and determine:
+per-package compare logdir and determine, for each engine, *why* it failed and
+whether portage-ng's failure is a genuine upstream break or a portage-ng gap.
 
-  emerge: failure stage (PLAN reject vs real BUILD break) + reason sub-tag.
-  portage-ng: how many ebuilds completed/failed, the FIRST genuinely failed
-              ebuild (op + pkg + phase), whether that pkg is the target, and
-              the target's package category.
+emerge side (plan-reason taxonomy):
+  - failure stage: PLAN reject (never proven unbuildable) vs real BUILD break.
+  - plan sub-reason: needs_keyword / needs_license (soft policy gate the user
+    can flip) vs needs_unmask (hard package.mask) vs use_dep_unsat /
+    required_use / blocker / circular / unsatisfiable (resolver constraints).
 
-'should have succeeded' (high precision) =
-  emerge rejected at PLAN (so the pkg was never proven unbuildable) AND
-  portage-ng's failure is NOT a real source break, i.e. either
-    - the only failed pkg(s) are trivial always-install pkgs
-      (acct-user/*, acct-group/*, virtual/*), or
-    - the failing ebuild phase is a merge-time phase (install/merge/
-      preinst/postinst/setup) rather than a source phase
-      (unpack/prepare/configure/compile/test).
+portage-ng side (build-failure analysis):
+  - completed / failed action counts.
+  - the FIRST genuinely-failed ebuild (op + pkg + phase) -- the cascade *root*,
+    since portage-ng builds dependencies before the target.
+  - a finer *signature* of that root failure (compile / configure_cmake /
+    configure_meson / python / collision / fetch / test) plus an error excerpt,
+    read from the salvaged build-logs/portage-ng/**.build.log[.gz] and the
+    target build log.
+
+Derived judgements:
+  - 'should_have_succeeded' (high precision): emerge rejected at PLAN AND
+    portage-ng's failure is not a real source break (only trivial always-install
+    pkgs failed, or the failing phase is a merge-time phase).
+  - 'expectation' bucket (genuine_break / expected_build / ok_to_fail /
+    resolver_gap) framing each case against user policy.
+  - 'cluster' (A..H): the portage-ng-improvement theme the case belongs to
+    (see CLUSTER_DOC below), with a per-cluster cascade-root histogram in the
+    summary so a handful of root packages can be prioritised.
+
+Outputs: a human summary on stdout, plus <RUN>/failfail-classified.json (a JSON
+array, one object per case) consumed by _ff_unmask_probe.py and show-fail.py.
+
+Usage: classify-failfail.py [RUN_DIR]
 """
 import os
 import re
 import sys
 import glob
+import gzip
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 
-RUN = sys.argv[1] if len(sys.argv) > 1 else "/srv/tinderbox-ng/reports/compare-matrix-20260613T162300"
+RUN = sys.argv[1] if len(sys.argv) > 1 else "/srv/tinderbox-ng/reports/compare-matrix-20260621T174159"
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 logs_re = re.compile(r"logs:\s*(/srv/tinderbox-ng/logs/compare-\S+?)\)")
@@ -52,25 +70,52 @@ def strip(s):
     return ANSI.sub("", s)
 
 
+def read_any(p):
+    try:
+        if p.endswith(".gz"):
+            return strip(gzip.open(p, "rt", errors="replace").read())
+        return strip(read(p))
+    except OSError:
+        return ""
+
+
+def tail_any(p, nbytes=150_000):
+    """Read only the tail of a (possibly .gz) log. The Portage failure banner and
+    the real error are always near the end, so tailing keeps regex/splitlines off
+    multi-MB build logs -- essential for large runs (systemd/rust/llvm logs)."""
+    try:
+        if p.endswith(".gz"):
+            buf = ""
+            with gzip.open(p, "rt", errors="replace") as fh:
+                while True:
+                    chunk = fh.read(1_000_000)
+                    if not chunk:
+                        break
+                    buf = (buf + chunk)[-nbytes:]
+            return strip(buf)
+        sz = os.path.getsize(p)
+        with open(p, "r", errors="replace") as fh:
+            if sz > nbytes:
+                fh.seek(sz - nbytes)
+            return strip(fh.read())
+    except OSError:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# emerge plan-reason taxonomy
+# ---------------------------------------------------------------------------
 MASKED_BY = re.compile(r"masked by:\s*([^)\n]+)")
 
 
 def _mask_subreason(t):
-    """Given an emerge plan log that contains masked candidates, decide whether
-    the request is satisfiable by *keywording* / *accepting a license* (a soft
-    policy gate the user can flip with the reasonable expectation that the build
-    then works) versus requiring a hard *package.mask* override (an explicit
-    unmask, after which it is 'ok to fail').
-
-    A target lists one or more masked candidates ('One of the following ...').
-    If any single candidate is gated ONLY by keyword and/or license (no
-    package.mask), flipping that gate suffices -> needs_keyword / needs_license.
-    If every satisfying candidate requires a package.mask override ->
-    needs_unmask.
+    """Decide whether a masked request is satisfiable by *keywording* / accepting
+    a *license* (soft gates the user can flip) vs requiring a hard *package.mask*
+    override. If any single satisfying candidate is gated ONLY by keyword/license,
+    flipping that suffices; if every candidate needs package.mask -> needs_unmask.
     """
     reasons = [r.strip().lower() for r in MASKED_BY.findall(t)]
     if not reasons:
-        # 'have been masked' summary without explicit per-candidate reason
         if "license" in t.lower() and ("accept_license" in t.lower() or "license(s)" in t.lower()):
             return "needs_license"
         return "needs_unmask"
@@ -82,14 +127,11 @@ def _mask_subreason(t):
         if not has_mask and (has_kw or has_lic):
             soft_only.append("needs_license" if (has_lic and not has_kw) else "needs_keyword")
     if soft_only:
-        # prefer keyword tag if both kinds present
         return "needs_keyword" if "needs_keyword" in soft_only else soft_only[0]
     return "needs_unmask"
 
 
 def emerge_plan_reason(t):
-    # USE-flag dependency that cannot be satisfied (e.g. libselinux[python],
-    # acct-user/git[gitea]) -- a resolver constraint, not a user policy gate.
     if "there are no ebuilds built with USE flags to satisfy" in t or \
        "no ebuilds built with USE flags" in t:
         return "use_dep_unsat"
@@ -106,48 +148,96 @@ def emerge_plan_reason(t):
     return "other_plan"
 
 
-def read_any(p):
-    try:
-        if p.endswith(".gz"):
-            import gzip
-            return strip(gzip.open(p, "rt", errors="replace").read())
-        return strip(read(p))
-    except OSError:
-        return ""
-
-
+# ---------------------------------------------------------------------------
+# portage-ng build-failure signature
+# ---------------------------------------------------------------------------
 COLLISION = re.compile(r"file collision|colliding files|detected file collision|preexisting file", re.IGNORECASE)
+FETCH = re.compile(r"ERROR 404|404 Not Found|Couldn't download|failed \(.*fetch|unable to fetch", re.I)
+
+# Priority-ordered fine signatures applied to a failing pkg's log blob.
+SIGS = [
+    ("configure_cmake", re.compile(r"CMake Error|Could not find a package configuration file", re.I)),
+    ("configure_meson", re.compile(r"meson\.build:\d+:\d+:\s*ERROR|ERROR: Dependency \"", re.I)),
+    ("python", re.compile(r"ModuleNotFoundError|No module named|ImportError:", re.I)),
+    ("test", re.compile(r"failed \(test phase\)", re.I)),
+    ("compile", re.compile(r"emake failed|failed \(compile phase\)|\berror:|undefined reference|ld returned|collect2:", re.I)),
+]
+
+
+def _sig_of(blob):
+    """Return (signature, matched_line) for a failing pkg's log blob."""
+    for name, rx in SIGS:
+        m = rx.search(blob)
+        if m:
+            line = ""
+            for ln in blob.splitlines():
+                if rx.search(ln):
+                    line = ln.strip()[:200]
+                    break
+            return name, line
+    return "", ""
 
 
 def fail_type_of_pkg(d, pkg):
     """Classify the real failure of the first-failed pkg.
 
-    Returns one of: compile/configure/install/merge/preinst/postinst/setup/
-    unpack/prepare/test (ebuild phase), 'collision' (merge-time file collision),
-    'fetch' (download failure), or '' if nothing salvaged.
+    Returns (phase, sig, excerpt):
+      phase   - ebuild phase from the ERROR banner (compile/configure/install/...),
+                'collision', 'fetch', or '' if nothing salvaged.
+      sig     - finer signature (configure_cmake/configure_meson/python/compile/...)
+                or '' / 'collision' / 'fetch'.
+      excerpt - up to ~600 chars around the failure, for cluster keyword matching.
     """
     if not pkg:
-        return ""
+        return "", "", ""
     cat, _, pn = pkg.partition("/")
     texts = []
-    # specific pkg build log (most precise)
+    seen = set()
     for g in (os.path.join(d, "build-logs", "portage-ng", cat, pn + "-*.build.log*"),
               os.path.join(d, "build-logs", "portage-ng", cat, "*")):
         for f in glob.glob(g):
-            if os.path.basename(f).startswith(pn):
-                texts.append(read_any(f))
-    # target build log if this is the target
+            if f not in seen and os.path.basename(f).startswith(pn):
+                seen.add(f)
+                texts.append(tail_any(f))
     for f in glob.glob(os.path.join(d, "portage-ng.target.*.build.log")):
-        texts.append(read_any(f))
+        if f not in seen:
+            seen.add(f)
+            texts.append(tail_any(f))
     blob = "\n".join(texts)
     if not blob.strip():
-        return ""
+        return "", "", ""
+
+    # excerpt around the banner (or the tail if no banner)
+    lines = blob.splitlines()
+    bidx = None
+    for i, ln in enumerate(lines):
+        if phase_re.search(ln):
+            bidx = i
+    if bidx is not None:
+        excerpt = "\n".join(lines[max(0, bidx - 12):bidx + 3])
+    else:
+        excerpt = "\n".join(lines[-16:])
+    excerpt = excerpt[-600:]
+
     if COLLISION.search(blob):
-        return "collision"
+        return "collision", "collision", excerpt
+    if FETCH.search(blob):
+        return "fetch", "fetch", excerpt
     m = phase_re.search(blob)
-    if m:
-        return m.group(2)
-    return ""
+    phase = m.group(2) if m else ""
+    sig, _line = _sig_of(blob)
+    return phase, sig, excerpt
+
+
+# ---------------------------------------------------------------------------
+# per-case classification
+# ---------------------------------------------------------------------------
+def _cp(pkgver):
+    if not pkgver:
+        return ""
+    cat, _, pf = pkgver.partition("/")
+    pn = re.sub(r"-\d+(\.\d+)*.*$", "", pf)
+    return f"{cat}/{pn}"
 
 
 def classify(target, d):
@@ -173,21 +263,13 @@ def classify(target, d):
     first = fails[0] if fails else ("", "", "")
     first_pkg = first[2]
     first_op = first[1]
-    # package category/pn of the failed pkg (strip version)
-    def cp(pkgver):
-        if not pkgver:
-            return ""
-        catpf = pkgver
-        cat, _, pf = catpf.partition("/")
-        pn = re.sub(r"-\d+(\.\d+)*.*$", "", pf)
-        return f"{cat}/{pn}"
-    first_cp = cp(first_pkg)
-    phase = fail_type_of_pkg(d, first_pkg) if first_pkg else ""
+    first_cp = _cp(first_pkg)
+    phase, sig, excerpt = fail_type_of_pkg(d, first_pkg) if first_pkg else ("", "", "")
     # collisions surface as op=install with no ebuild phase; tag fetch failures
     if not phase and first_op in ("download", "fetch"):
-        phase = "fetch"
+        phase, sig = "fetch", "fetch"
 
-    fail_cps = [cp(p) for (_, _, p) in fails]
+    fail_cps = [_cp(p) for (_, _, p) in fails]
     all_trivial = bool(fail_cps) and all(c.startswith(TRIVIAL_PREFIX) for c in fail_cps)
     target_is_first = first_cp == target
 
@@ -202,23 +284,17 @@ def classify(target, d):
         "pn_first_fail_pkg": first_cp,
         "pn_first_fail_op": first_op,
         "pn_first_fail_phase": phase,
+        "pn_first_fail_sig": sig,
+        "pn_err_excerpt": excerpt,
         "pn_all_fail_cps": fail_cps,
         "all_trivial": all_trivial,
         "target_is_first_fail": target_is_first,
     }
 
 
-# How a fail/fail case maps onto user expectation, per the rig's contract:
-#   genuine_break    - emerge actually built it and the source failed: both right to fail.
-#   expected_build   - emerge only refused on a soft policy gate the user can flip
-#                      (accept_keywords / accept_license). A user who keyworded the
-#                      package would reasonably expect it to build -> a fail here is
-#                      a real concern.
-#   ok_to_fail       - emerge refused because the package is package.mask'd. Building
-#                      it requires an explicit unmask, so it is 'ok' for it to fail.
-#   resolver_gap     - emerge refused on a constraint portage-ng ignored (unsatisfiable
-#                      USE-dep, REQUIRED_USE, blocker, circular): portage-ng should have
-#                      *refused at plan*, not failed mid-build.
+# ---------------------------------------------------------------------------
+# user-expectation grouping (unchanged contract)
+# ---------------------------------------------------------------------------
 EXPECT = {
     "build_fail": "genuine_break",
     "needs_keyword": "expected_build",
@@ -247,12 +323,60 @@ def should_have(r):
         return True
     ph = r.get("pn_first_fail_phase", "")
     op = r.get("pn_first_fail_op", "")
-    # merge-time failure (built ok, merge bugged) and only a single failure
     if (r.get("pn_failed") == 1) and (ph in MERGE_PHASES or (not ph and op in MERGE_PHASES)):
         return True
     return False
 
 
+# ---------------------------------------------------------------------------
+# portage-ng-improvement clustering
+# ---------------------------------------------------------------------------
+CLUSTER_DOC = {
+    "A": "Qt6/KDE build-dep gap (qtwayland/qtpaths absent; dep[wayland] unhonored)",
+    "B": "dep[useflag] / configure gap (e.g. cairo[X]) -- USE-dep not satisfied",
+    "C": "toolchain/setup USE prerequisite (e.g. gcc[objc])",
+    "D": "Haskell/GHC (and OCaml) ABI-hash reverse-dep rebuild propagation",
+    "E": "genuine upstream breakage (compile/configure; not portage-ng's fault)",
+    "F": "fetch-restricted / dead distfile (not a resolver failure)",
+    "G": "resource (timeout / OOM-kill)",
+    "H": "merge-time collision / circular / opaque (needs manual look)",
+}
+
+
+def cluster(r):
+    cp = r.get("pn_first_fail_pkg", "") or ""
+    cat = cp.split("/")[0] if "/" in cp else ""
+    ph = r.get("pn_first_fail_phase", "") or ""
+    sig = r.get("pn_first_fail_sig", "") or ""
+    exc = r.get("pn_err_excerpt", "") or ""
+    op = r.get("pn_first_fail_op", "") or ""
+
+    if ph == "fetch" or sig == "fetch" or op in ("download", "fetch") or str(r.get("pn_exit", "")).startswith("RESTRICT"):
+        return "F"
+    if sig == "collision" or ph == "collision":
+        return "H"
+    if cat in ("kde-frameworks", "kde-plasma", "kde-apps", "kde-misc") or \
+       cp in ("dev-libs/plasma-wayland-protocols", "dev-qt/qtbase") or \
+       "Qt6Wayland" in exc or "qtpaths" in exc:
+        return "A"
+    if cat == "dev-haskell" or cp.startswith("dev-ml/") or "haskell-updater" in exc or "ghc-pkg" in exc:
+        return "D"
+    if cp.startswith("gnustep") or ph == "setup":
+        return "C"
+    if r.get("em_stage") == "BUILD":
+        return "E"
+    if ph == "configure" or sig in ("configure_cmake", "configure_meson"):
+        # cairo[X]/gcr/lrelease/etc. USE-dep gaps land here; genuine configure
+        # breaks (no obvious dep signature) also land here but are rarer.
+        return "B"
+    if ph == "compile" or sig == "compile":
+        return "E"
+    if ph in MERGE_PHASES:
+        return "H"
+    return "H"
+
+
+# ---------------------------------------------------------------------------
 def main():
     rows = []
     for wl in sorted(glob.glob(os.path.join(RUN, "*.log"))):
@@ -274,11 +398,12 @@ def main():
         else:
             r = {"target": target, "logdir": d, "em_stage": "?", "em_reason": "no_logdir",
                  "pn_stage": "?", "pn_failed": None, "pn_first_fail_pkg": "",
-                 "pn_first_fail_op": "", "pn_first_fail_phase": "", "all_trivial": False,
-                 "target_is_first_fail": False}
+                 "pn_first_fail_op": "", "pn_first_fail_phase": "", "pn_first_fail_sig": "",
+                 "pn_err_excerpt": "", "all_trivial": False, "target_is_first_fail": False}
         r["pn_exit"], r["em_exit"] = pn_exit, emr_exit
         r["should_have"] = should_have(r)
         r["expectation"] = expectation(r)
+        r["cluster"] = cluster(r)
         rows.append(r)
 
     out = os.path.join(RUN, "failfail-classified.json")
@@ -296,57 +421,46 @@ def main():
         if ec.get(g):
             print(f"  {ec[g]:5d}  {g}")
 
+    print("\n== PORTAGE-NG IMPROVEMENT CLUSTERS ==")
+    cc = Counter(r["cluster"] for r in rows)
+    for k in sorted(cc, key=lambda x: -cc[x]):
+        print(f"  {cc[k]:5d}  {k}: {CLUSTER_DOC.get(k, '')}")
+
+    print("\n== per-cluster cascade roots (root pkg -> #targets blocked) ==")
+    roots = defaultdict(Counter)
+    for r in rows:
+        if r.get("pn_first_fail_pkg"):
+            roots[r["cluster"]][r["pn_first_fail_pkg"]] += 1
+    for k in sorted(roots, key=lambda x: -cc[x]):
+        top = roots[k].most_common(8)
+        if not top:
+            continue
+        print(f"  [{k}] {CLUSTER_DOC.get(k, '')}")
+        for pkg, n in top:
+            print(f"       {n:4d}  {pkg}")
+
     exp = [r for r in rows if r["expectation"] == "expected_build"]
     print(f"\n== 'EXPECTED TO BUILD' (emerge refused only on keyword/license): {len(exp)} ==")
     print("   -> a fail here is a real concern (user would just accept_keywords/license)")
-    print("   -- by emerge reason --")
-    for k, v in Counter(r["em_reason"] for r in exp).most_common():
-        print(f"     {v:5d}  {k}")
     print("   -- by portage-ng real failure type --")
     for k, v in Counter((r["pn_first_fail_phase"] or r["pn_first_fail_op"] or "(none)") for r in exp).most_common():
         tag = "  <-- portage-ng merge/own bug" if k in ("collision", "install", "merge", "preinst", "postinst", "setup") else ""
         print(f"     {v:5d}  {k}{tag}")
-    merge_bugs = [r for r in exp if (r["pn_first_fail_phase"] or r["pn_first_fail_op"]) in ("collision", "install", "merge", "preinst", "postinst", "setup")]
-    print(f"\n   -- {len(merge_bugs)} EXPECTED-TO-BUILD cases where portage-ng died at merge/own step (strongest 'should have succeeded') --")
-    for r in merge_bugs[:60]:
-        print(f"     {r['target']:42s} pn_fail={r['pn_first_fail_pkg']} "
-              f"type={r['pn_first_fail_phase'] or r['pn_first_fail_op']}")
-    # write the expected-build list out for follow-up
+
     with open(os.path.join(RUN, "failfail-expected-build.txt"), "w") as f:
         for r in sorted(exp, key=lambda x: x["target"]):
             f.write("%s\t%s\t%s\t%s\n" % (
                 r["target"], r["em_reason"],
                 r["pn_first_fail_phase"] or r["pn_first_fail_op"], r["pn_first_fail_pkg"]))
 
-    print("\n== CROSS-TAB: emerge reject reason  x  portage-ng real failure type ==")
-    ct = Counter((r["em_reason"], r.get("pn_first_fail_phase") or r.get("pn_first_fail_op") or "(none)") for r in rows)
-    reasons = [k for k, _ in Counter(r["em_reason"] for r in rows).most_common()]
-    ftypes = [k for k, _ in Counter((r.get("pn_first_fail_phase") or r.get("pn_first_fail_op") or "(none)") for r in rows).most_common()]
-    hdr = "  %-14s" % "emerge\\pn" + "".join("%-11s" % f[:10] for f in ftypes)
-    print(hdr)
-    for rs in reasons:
-        line = "  %-14s" % rs
-        for f in ftypes:
-            v = ct.get((rs, f), 0)
-            line += "%-11s" % (str(v) if v else ".")
-        print(line)
-
     sh = [r for r in rows if r["should_have"]]
     print(f"\n== 'portage-ng should have succeeded' candidates: {len(sh)} ==")
-    print("-- by emerge reject reason --")
     for k, v in Counter(r["em_reason"] for r in sh).most_common():
         print(f"  {v:5d}  {k}")
-    print("-- by pn failing phase --")
-    for k, v in Counter((r["pn_first_fail_phase"] or r["pn_first_fail_op"] or "?") for r in sh).most_common():
-        print(f"  {v:5d}  {k}")
-    print("-- by target category --")
-    for k, v in Counter(r["target"].split("/")[0] for r in sh).most_common(15):
-        print(f"  {v:5d}  {k}")
-
-    print("\n-- sample candidates --")
-    for r in sh[:40]:
+    print("-- sample candidates --")
+    for r in sh[:30]:
         print(f"  {r['target']:45s} emerge={r['em_reason']:13s} pn_fail={r['pn_first_fail_pkg']} "
-              f"op={r['pn_first_fail_op']} phase={r['pn_first_fail_phase']} nfail={r['pn_failed']}")
+              f"phase={r['pn_first_fail_phase']} sig={r['pn_first_fail_sig']} nfail={r['pn_failed']}")
     print(f"\nfull json -> {out}")
 
 
