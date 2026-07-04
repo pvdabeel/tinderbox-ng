@@ -24,11 +24,14 @@
 dev-lang/ghc binary
 
 # kde-plasma/xdg-desktop-portal-kde and kde-plasma/spectacle include
-# <KWaylandExtras>, a header kde-frameworks/kguiaddons only installs
-# with USE=wayland, but their ebuilds depend on kguiaddons WITHOUT a
-# [wayland] bracket (Gentoo metadata gap, portage-ng#97). Desktop
-# profiles enable USE=wayland globally so this never surfaces there; on
-# this headless/openrc baseline BOTH engines build kguiaddons -wayland
-# and the portal/spectacle compile is then guaranteed to fail. Force
-# the flag until the upstream ebuilds grow the bracketed dep.
+# <KWaylandExtras>, a header kde-frameworks/kwindowsystem only installs
+# with USE=wayland, but their ebuilds depend on kwindowsystem WITHOUT a
+# [wayland] bracket (Gentoo metadata gap, portage-ng#97). The same
+# consumers also want kguiaddons' wayland clipboard/inhibition support,
+# again without a bracketed dep. Desktop profiles enable USE=wayland
+# globally so this never surfaces there; on this headless/openrc
+# baseline BOTH engines build these frameworks -wayland and the
+# portal/spectacle compile is then guaranteed to fail. Force the flags
+# until the upstream ebuilds grow the bracketed deps.
 kde-frameworks/kguiaddons wayland
+kde-frameworks/kwindowsystem wayland

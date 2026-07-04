@@ -53,6 +53,8 @@ Plain templates (substitution is a no-op but safe to send via this script):
   baseline.repos.conf
   baseline.package.use
   baseline.package.accept_keywords
+  baseline.package.env
+  baseline.env.no-rbql.conf
 EOF
   exit 1
 }

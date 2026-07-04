@@ -243,6 +243,8 @@ TINDERBOX_REQUIRED_TEMPLATES=(
   baseline.make.conf
   baseline.package.use
   baseline.package.accept_keywords
+  baseline.package.env
+  baseline.env.no-rbql.conf
   baseline.repos.conf
   portage-ng-dev.in
   manifest-100.txt
@@ -1247,11 +1249,15 @@ _bootstrap_apply_portage_templates() {
   install -d "$BASELINE_DIR/etc/portage/repos.conf"
   install -d "$BASELINE_DIR/etc/portage/package.use"
   install -d "$BASELINE_DIR/etc/portage/package.accept_keywords"
+  install -d "$BASELINE_DIR/etc/portage/package.env"
+  install -d "$BASELINE_DIR/etc/portage/env"
   cp_template baseline.repos.conf "$BASELINE_DIR/etc/portage/repos.conf/gentoo.conf"
   cp_template baseline.make.conf  "$BASELINE_DIR/etc/portage/make.conf"
   cp_template baseline.package.use "$BASELINE_DIR/etc/portage/package.use/00-tinderbox-ng-defaults"
   cp_template baseline.package.accept_keywords \
       "$BASELINE_DIR/etc/portage/package.accept_keywords/00-tinderbox-ng-defaults"
+  cp_template baseline.package.env "$BASELINE_DIR/etc/portage/package.env/00-tinderbox-ng-defaults"
+  cp_template baseline.env.no-rbql.conf "$BASELINE_DIR/etc/portage/env/tinderbox-ng-no-rbql.conf"
   _baseline_sync_ccache_feature
 }
 
@@ -1986,7 +1992,7 @@ cmd_baseline_thaw() {
 # =============================================================================
 #
 # Re-apply the shipped /etc/portage templates (make.conf, repos.conf,
-# package.use / package.accept_keywords defaults) from share/tinderbox-ng/
+# package.use / package.accept_keywords / package.env defaults) from share/tinderbox-ng/
 # into the existing baseline, then idempotently re-emerge the live Portage
 # atom when TINDERBOX_BASELINE_PORTAGE_TARGET is set. Cheap for templates;
 # the Portage step is a no-op when already installed. Does not touch kb.qlf
@@ -2014,6 +2020,8 @@ cmd_refresh_baseline_config() {
   log_info "  $BASELINE_DIR/etc/portage/repos.conf/gentoo.conf"
   log_info "  $BASELINE_DIR/etc/portage/package.use/00-tinderbox-ng-defaults"
   log_info "  $BASELINE_DIR/etc/portage/package.accept_keywords/00-tinderbox-ng-defaults"
+  log_info "  $BASELINE_DIR/etc/portage/package.env/00-tinderbox-ng-defaults"
+  log_info "  $BASELINE_DIR/etc/portage/env/tinderbox-ng-no-rbql.conf"
   bootstrap_upgrade_portage
   log_info "new compare sessions inherit the update via the baseline lower layer"
 }
@@ -4777,7 +4785,8 @@ Subcommands:
                            doctor` warns when this is needed.
   refresh-baseline-config  Re-apply share/tinderbox-ng portage templates
                            (make.conf, repos.conf, package.use,
-                           package.accept_keywords) into an existing baseline,
+                           package.accept_keywords, package.env) into an
+                           existing baseline,
                            then idempotently re-emerge the live Portage atom
                            when TINDERBOX_BASELINE_PORTAGE_TARGET is set.
                            Picks up template fixes without TINDERBOX_REBOOTSTRAP=1.
