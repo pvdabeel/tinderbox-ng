@@ -41,6 +41,10 @@ exactly one home, decided by *who runs it and why*.
   - `consolidate-phase-stats.py` (~340 lines): aggregates per-session
     `phase_stats.pl` files into a master forecast file portage-ng can
     load as `Knowledge/phase_stats.pl`.
+  - `binpkg-adjusted.py`: emerge `[binary]` CPV coverage in the
+    portage-ng merge set. Ignores PN-only BDEPEND extras that inflate
+    raw upper-VDB counts when emerge takes binpkgs. Invoked by
+    `compare` (per-session table row) and `tinderbox-ng binpkg-adjusted`.
   - `extract-timing.py` (~470 lines): walks compare session log dirs
     and emits a JSON report comparing portage-ng vs emerge wall-clock
     timing per pass (plan/build) plus pn/em ratios, head-to-head
@@ -165,13 +169,17 @@ phase-stats --run <run>     ─►  libexec/tinderbox-ng/consolidate-phase-stats
 extract-timing --run <run>  ─►  libexec/tinderbox-ng/extract-timing.py
                                   └─ timing.json     (per-pass wall clock,
                                                       pn/em ratios, head-to-head)
+
+binpkg-adjusted --run <run> ─►  libexec/tinderbox-ng/binpkg-adjusted.py
+                                  emerge [binary] CPV ⊆ portage-ng merge set
 ```
 
 Per-session compare logs land in
 `/srv/tinderbox-ng/logs/compare-<label>-<stamp>/`. Matrix-run reports
-land in `/srv/tinderbox-ng/reports/compare-matrix-<stamp>/`. All three
-of `analyze`, `phase-stats` and `extract-timing` auto-detect the most
-recent matrix run when invoked without `--run` / `--logdir`.
+land in `/srv/tinderbox-ng/reports/compare-matrix-<stamp>/`. All of
+`analyze`, `phase-stats`, `extract-timing` and `binpkg-adjusted`
+auto-detect the most recent matrix run when invoked without `--run` /
+`--logdir`.
 
 `<log>.timing` companion files are written by `_compare_run_pass`
 inside `cmd_compare`. Format is key=value, one pair per line:
@@ -409,6 +417,7 @@ bash -n libexec/tinderbox-ng/run-matrix.sh
 python3 -m py_compile libexec/tinderbox-ng/compare-merge-emerge.py
 python3 -m py_compile libexec/tinderbox-ng/consolidate-phase-stats.py
 python3 -m py_compile libexec/tinderbox-ng/extract-timing.py
+python3 -m py_compile libexec/tinderbox-ng/binpkg-adjusted.py
 python3 -m py_compile contrib/render-compare-matrix.py
 
 # Manpage lint (clean run, no warnings):

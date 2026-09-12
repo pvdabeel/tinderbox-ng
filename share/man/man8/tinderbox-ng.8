@@ -276,7 +276,8 @@ Spin two fresh sessions, run
 AND
 .B emerge
 on the same target in parallel, print a side\-by\-side summary (exit codes,
-plan size, completed steps, VDB delta, first error). Default:
+plan size, completed steps, VDB delta, binpkg\-adjusted CPV match, first
+error). Default:
 .BR \-\-pretend .
 The
 .B exit
@@ -392,6 +393,22 @@ run.
 .B \-\-once
 forces a one\-shot dump (also the default when stdout is not a tty). Alias:
 .BR monitor .
+The dashboard's
+.B vdb count Δ
+line is the raw upper\-VDB count difference (inflated when portage\-ng
+installs BDEPEND that emerge skips on the binpkg path).
+.B binpkg\-adj
+is the emerge\-[binary] CPV coverage in the portage\-ng VDB.
+.TP
+.B "binpkg\-adjusted " [ "\-\-run \fIDIR\fR" " | " "\-\-logdir \fIDIR\fR" "] [" "\-\-json" "]"
+For every CPV emerge merges as a binpkg, check that portage\-ng merged
+the same CPV (PMS name/version split, trailing
+.I \-<int>
+BUILD_ID stripped). Extra portage\-ng BDEPEND installs are ignored.
+Default source is the most recent
+.B compare\-matrix
+run. Alias:
+.BR binpkg_adjusted .
 .TP
 .B "analyze " [ "\-\-run \fIDIR\fR" " | " "\-\-logdir \fIDIR\fR" "] [" "\-\-out \fIFILE\fR" "] [" "\-\-jobs \fIN\fR" "] [" "\-\-md5\-cache \fIDIR\fR" "] [" "\-\-target\-regex \fIRE\fR" "] [" "\-\-full\-lists" "]"
 Plan\-correctness analysis over a matrix run (or any directory of
@@ -599,6 +616,7 @@ invokes internally
 .IR compare-merge-emerge.py ", "
 .IR consolidate-phase-stats.py ", "
 .IR extract-timing.py ", "
+.IR binpkg-adjusted.py ", "
 .IR run-matrix.sh ).
 .TP
 .I share/tinderbox-ng/

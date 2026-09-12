@@ -483,6 +483,10 @@ The summary table contrasts:
   completed`, emerge: `>>> Completed`)
 - **merged into VDB**: `cat/name-version` directories that ended up in the
   session's upper VDB (`var/db/pkg`)
+- **binpkg-adjusted**: of the CPVs emerge merges as `[binary]`, how many
+  also landed in portage-ng's VDB (BUILD_ID stripped). This is the
+  comparison that ignores portage-ng-only BDEPEND extras emerge skips
+  on a warm binpkg cache. Raw VDB counts still include those extras.
 - **VDB delta**: which packages only one side merged
 
 Logs land in `/srv/tinderbox-ng/logs/compare-<label>-<stamp>/` and are

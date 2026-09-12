@@ -262,6 +262,7 @@ TINDERBOX_REQUIRED_HELPERS=(
   consolidate-phase-stats.py
   extract-timing.py
   portage-ng-exit-label.py
+  binpkg-adjusted.py
 )
 
 # Minimum disk-space hints (in MiB) for $TINDERBOX_ROOT before bootstrap.
@@ -2997,6 +2998,42 @@ _compare_summarize() {
   printf '│ %-16s │ %-23s │ %-25s │\n' 'plan actions' "$pn_plan_actions"  "$em_plan_actions"
   printf '│ %-16s │ %-23s │ %-25s │\n' 'completed'    "$pn_completed"     "$em_completed"
   printf '│ %-16s │ %-23s │ %-25s │\n' 'merged into VDB' "$pn_n"          "$em_n"
+
+  # Binpkg-adjusted: of the CPVs emerge merges as [binary], how many
+  # landed in portage-ng's upper VDB? Ignores PN-only BDEPEND extras
+  # that inflate the raw VDB count delta when emerge takes binpkgs.
+  local ba_n="?" ba_hit="?" ba_miss="?" ba_ver="?" ba_cn="?"
+  local ba_cell="?" ba_note="helper missing"
+  local ba_helper="${TINDERBOX_BINPKG_ADJUSTED:-$LIBEXEC_DIR/binpkg-adjusted.py}"
+  local ba_vdb_tmp=""
+  if [[ -f "$ba_helper" && -f "$em_plan_log" ]]; then
+    ba_vdb_tmp="$(mktemp)"
+    printf '%s\n' "$pn_vdb" > "$ba_vdb_tmp"
+    local ba_kv=""
+    ba_kv="$(python3 "$ba_helper" --emerge-plan "$em_plan_log" --pn-vdb "$ba_vdb_tmp" --kv 2>/dev/null)" || ba_kv=""
+    if [[ -n "$ba_kv" ]]; then
+      local ba_k ba_v
+      while IFS='=' read -r ba_k ba_v; do
+        case "$ba_k" in
+          binpkg_n)        ba_n="$ba_v" ;;
+          binpkg_hit)      ba_hit="$ba_v" ;;
+          binpkg_miss)     ba_miss="$ba_v" ;;
+          binpkg_ver_miss) ba_ver="$ba_v" ;;
+          binpkg_cn_miss)  ba_cn="$ba_v" ;;
+        esac
+      done <<< "$ba_kv"
+      if [[ "$ba_n" == "0" ]]; then
+        ba_cell="n/a"
+        ba_note="no emerge binaries"
+      elif [[ "$ba_n" =~ ^[0-9]+$ && "$ba_hit" =~ ^[0-9]+$ ]]; then
+        ba_cell="${ba_hit}/${ba_n}"
+        ba_note="${ba_miss} miss"
+      fi
+    else
+      ba_note="parse failed"
+    fi
+  fi
+  printf '│ %-16s │ %-23s │ %-25s │\n' 'binpkg-adjusted' "$ba_cell" "$ba_note"
   printf '└──────────────────┴─────────────────────────┴───────────────────────────┘\n'
 
   if [[ -n "$pn_first_err" || -n "$em_first_err" ]]; then
@@ -3032,6 +3069,12 @@ _compare_summarize() {
       printf '  in both: %s packages\n' "$nb"
     fi
   fi
+
+  if [[ -n "$ba_vdb_tmp" && -f "$ba_helper" && "$ba_n" =~ ^[1-9][0-9]*$ && "$ba_miss" =~ ^[1-9][0-9]*$ ]]; then
+    printf '\nBinpkg-adjusted (emerge [binary] CPVs vs portage-ng VDB):\n'
+    python3 "$ba_helper" --emerge-plan "$em_plan_log" --pn-vdb "$ba_vdb_tmp" 2>/dev/null || true
+  fi
+  [[ -n "$ba_vdb_tmp" ]] && rm -f "$ba_vdb_tmp"
 
   printf '\nFull logs:\n'
   printf '  portage-ng plan : %s\n'  "$pn_plan_log"
@@ -3779,11 +3822,16 @@ _progress_render_frame() {
   #   fail / ok     PN-only loss / regression (PN failed where emerge succeeded)
   #   fail / fail   both engines failed (usually environmental: no network,
   #                 missing system service, package legitimately broken)
-  #   vdb mismatch  both ok but vdb_delta != "=" (planner picked a different
-  #                 set of packages even though both runs completed)
+  #   vdb mismatch     both ok but vdb_delta != "=" (raw upper-VDB *count*;
+  #                    inflated when PN installs BDEPEND that emerge skips
+  #                    on the binpkg path)
+  #   binpkg-adjusted  of emerge [binary] CPVs, how many PN also merged
+  #                    (the metric that ignores PN-only build-tool extras)
   #
   # awk tolerates partial TSVs (header-only after start, growing rows under
-  # mutex from the parallel matrix). Empty file is a no-op.
+  # mutex from the parallel matrix). Empty file is a no-op. binpkg_n /
+  # binpkg_hit are columns 13-14 on new TSVs; older 12-column rows skip
+  # the binpkg-adjusted line.
   if [[ -n "$run" && -f "$run/results.tsv" ]]; then
     printf '\033[1mResults so far\033[0m\n'
     awk -F'\t' '
@@ -3800,6 +3848,12 @@ _progress_render_frame() {
         else if (is_ok_pn && !is_ok_em) { okfail++ }
         else if (!is_ok_pn && is_ok_em) { failok++ }
         else                            { failfail++ }
+        if (is_ok_pn && is_ok_em && NF >= 14 && $13 ~ /^[1-9][0-9]*$/ && $14 ~ /^[0-9]+$/) {
+          ba_rows++
+          ba_n += $13+0
+          ba_hit += $14+0
+          if ($14+0 < $13+0) ba_miss_rows++
+        }
       }
       END {
         if (total == 0) {
@@ -3821,7 +3875,13 @@ _progress_render_frame() {
         printf "  %sfail / ok%s      %6d  (%5.1f%%)   regressions (PN fail, emerge ok)\n", R, N, failok,       failok_pct
         printf "  %sfail / fail%s    %6d  (%5.1f%%)   both failed (environmental)\n",      Y, N, failfail,     failfail_pct
         if (vdb_mismatch > 0) {
-          printf "  %svdb mismatch%s   %6d  (%5.1f%% of ok/ok)   planner divergence\n", C, N, vdb_mismatch, vdb_mm_pct
+          printf "  %svdb count Δ%s    %6d  (%5.1f%% of ok/ok)   raw upper-VDB count (incl. PN BDEPEND)\n", C, N, vdb_mismatch, vdb_mm_pct
+        }
+        if (ba_rows > 0) {
+          ba_pct = (ba_n > 0) ? 100.0 * ba_hit / ba_n : 100.0
+          ba_row_pct = 100.0 * (ba_rows - ba_miss_rows) / ba_rows
+          printf "  %sbinpkg-adj%s     %6d/%d  (%5.1f%% CPVs, %5.1f%% rows)  emerge [binary] in PN VDB\n", \
+            G, N, ba_hit, ba_n, ba_pct, ba_row_pct
         }
       }
     ' "$run/results.tsv"
@@ -4493,6 +4553,86 @@ PHASE_STATS_HELP
 }
 
 # =============================================================================
+# tinderbox-ng binpkg-adjusted:
+#   emerge [binary] CPV coverage in portage-ng's merge set
+# =============================================================================
+#
+# Raw upper-VDB counts diverge whenever portage-ng installs BDEPEND that
+# emerge skips on a warm binpkg cache. This subcommand answers the
+# narrower question: for each CPV emerge merges as [binary], did
+# portage-ng merge that same CPV (BUILD_ID stripped)?
+
+cmd_binpkg_adjusted() {
+  local pinned_run="" alt_logdir="" json=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run)        pinned_run="$2"; shift 2 ;;
+      --run=*)      pinned_run="${1#--run=}"; shift ;;
+      --logdir)     alt_logdir="$2"; shift 2 ;;
+      --logdir=*)   alt_logdir="${1#--logdir=}"; shift ;;
+      --json)       json=1; shift ;;
+      -h|--help)
+        cat <<'BINPKG_ADJ_HELP'
+tinderbox-ng binpkg-adjusted [--run DIR | --logdir DIR] [--json]
+
+For every CPV emerge merges as a binpkg, check that portage-ng merged
+the same CPV. Extra portage-ng BDEPEND installs are ignored. This is
+the metric that belongs next to "vdb mismatch" when emerge is on the
+binpkg fast path and portage-ng still plans a source-shaped tree.
+
+Sources (mutually exclusive):
+  --run DIR        Matrix run dir. Default: most-recent under
+                   $REPORTS_DIR_DEFAULT. Follows each <label>.log
+                   wrapper to the compare logdir; scores completed
+                   results.tsv rows only.
+  --logdir DIR     A single compare-<label>-<stamp>/ session.
+
+Output is a text summary (ok/ok + all completed). --json dumps the
+same numbers. Alias: binpkg_adjusted.
+
+CPV matching uses the PMS left-to-right split and strips a trailing
+-<int> BUILD_ID (same rules as compare-merge-emerge.py).
+BINPKG_ADJ_HELP
+        return 0 ;;
+      *) die "binpkg-adjusted: unknown flag $1" ;;
+    esac
+  done
+
+  require_dirs
+
+  if [[ -n "$pinned_run" && -n "$alt_logdir" ]]; then
+    die "binpkg-adjusted: --run and --logdir are mutually exclusive"
+  fi
+
+  local helper="${TINDERBOX_BINPKG_ADJUSTED:-$LIBEXEC_DIR/binpkg-adjusted.py}"
+  [[ -f "$helper" ]] || die "binpkg-adjusted helper not found: $helper"
+  command -v python3 >/dev/null 2>&1 || die "python3 not found in PATH"
+
+  local -a args=()
+  [[ $json -eq 1 ]] && args+=(--json)
+  if [[ -n "$alt_logdir" ]]; then
+    [[ -d "$alt_logdir" ]] || die "logdir not found: $alt_logdir"
+    args+=(--logdir "$alt_logdir")
+  else
+    local reports_dir="${REPORTS_DIR_DEFAULT:-$TINDERBOX_ROOT/reports}"
+    local run="$pinned_run"
+    if [[ -z "$run" ]]; then
+      run="$(find "$reports_dir" -maxdepth 1 -mindepth 1 -type d \
+                  -regextype posix-extended \
+                  -regex ".*/compare-matrix-[0-9]{8}T[0-9]{6}" \
+                  -printf '%T@\t%p\n' 2>/dev/null \
+              | sort -rn | head -n1 | cut -f2-)"
+      [[ -n "$run" ]] || die "no compare-matrix-<stamp> run found under $reports_dir; use --run or --logdir"
+      log_info "auto-detected run: $(basename "$run")"
+    fi
+    [[ -d "$run" ]] || die "run dir not found: $run"
+    args+=(--run "$run")
+  fi
+
+  python3 "$helper" "${args[@]}"
+}
+
+# =============================================================================
 # tinderbox-ng extract-timing:
 #   per-engine, per-phase wall-clock timing across one or many compare sessions
 # =============================================================================
@@ -4880,6 +5020,13 @@ Subcommands:
                            Default output: <run>/phase_stats.pl. Aliases:
                            `phase_stats`, `consolidate-phase-stats`.
 
+  binpkg-adjusted [--run DIR | --logdir DIR] [--json]
+                           For each CPV emerge merges as [binary], did
+                           portage-ng merge the same CPV? Ignores PN-only
+                           BDEPEND extras that inflate raw VDB counts.
+                           Default: most-recent compare-matrix run.
+                           Alias: binpkg_adjusted.
+
   extract-timing [--run DIR | --logdir DIR | --src DIR | --session DIR]
                  [--out FILE] [--quiet]
                            Extract per-engine wall-clock timing from
@@ -4945,6 +5092,9 @@ Environment:
                                   Override path to consolidate-phase-stats.py
                                   (default $LIBEXEC_DIR/consolidate-phase-stats.py).
                                   Read by `tinderbox-ng phase-stats`.
+  TINDERBOX_BINPKG_ADJUSTED       Override path to binpkg-adjusted.py
+                                  (default $LIBEXEC_DIR/binpkg-adjusted.py).
+                                  Read by `compare` and `binpkg-adjusted`.
   TINDERBOX_TIMING_EXTRACTOR      Override path to extract-timing.py
                                   (default $LIBEXEC_DIR/extract-timing.py).
                                   Read by `tinderbox-ng extract-timing`.
@@ -5008,6 +5158,8 @@ main() {
     phase-stats)  cmd_phase_stats  "$@" ;;
     phase_stats)  cmd_phase_stats  "$@" ;;
     consolidate-phase-stats) cmd_phase_stats "$@" ;;
+    binpkg-adjusted) cmd_binpkg_adjusted "$@" ;;
+    binpkg_adjusted) cmd_binpkg_adjusted "$@" ;;
     extract-timing) cmd_extract_timing "$@" ;;
     extract_timing) cmd_extract_timing "$@" ;;
     timing)         cmd_extract_timing "$@" ;;

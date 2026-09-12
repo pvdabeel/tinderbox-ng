@@ -224,8 +224,9 @@ fi
 # completed rows) and just append; if for some reason the TSV is missing
 # or empty we re-emit the header so the file stays self-describing.
 if [[ ! -s "$TSV" ]]; then
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     target mode pn_exit em_exit pn_actions em_actions pn_completed em_completed pn_vdb em_vdb vdb_delta seconds \
+    binpkg_n binpkg_hit \
     > "$TSV"
 fi
 
@@ -266,6 +267,15 @@ _run_one() {
   em_completed="$(awk -F'│' '/^│ completed /{print $4}' "$log" | tr -d ' ' | head -n1)"
   pn_vdb="$(awk -F'│' '/^│ merged into VDB /{print $3}' "$log" | tr -d ' ' | head -n1)"
   em_vdb="$(awk -F'│' '/^│ merged into VDB /{print $4}' "$log" | tr -d ' ' | head -n1)"
+  local binpkg_cell binpkg_n="?" binpkg_hit="?"
+  binpkg_cell="$(awk -F'│' '/^│ binpkg-adjusted /{print $3}' "$log" | tr -d ' ' | head -n1)"
+  if [[ "$binpkg_cell" == "n/a" ]]; then
+    binpkg_n=0
+    binpkg_hit=0
+  elif [[ "$binpkg_cell" =~ ^([0-9]+)/([0-9]+)$ ]]; then
+    binpkg_hit="${BASH_REMATCH[1]}"
+    binpkg_n="${BASH_REMATCH[2]}"
+  fi
 
   for v in pn_exit em_exit pn_actions em_actions pn_completed em_completed pn_vdb em_vdb; do
     [[ -z "${!v}" ]] && eval "$v=?"
@@ -298,9 +308,10 @@ _run_one() {
   # interleave their output and we never lose a TSV row.
   (
     flock 9
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n' \
       "$pkg" "$MODE" "$pn_exit" "$em_exit" "$pn_actions" "$em_actions" \
       "$pn_completed" "$em_completed" "$pn_vdb" "$em_vdb" "$vdb_delta" "$elapsed" \
+      "$binpkg_n" "$binpkg_hit" \
       >> "$TSV"
     printf '%s[%*d/%d] %-*s  rc=%2d  pn=%-*s  em=%-*s  vdb pn=%*s em=%*s  %-*s  %*ds%s\n' \
       "$cm_color" \
