@@ -588,55 +588,78 @@ session_is_mounted() { return 1; }
 # of the process's chroot directory. Any process whose root resolves under
 # `$SESSIONS_DIR/$name/` is a leftover from this session and gets SIGKILL'd.
 #
-# We also sweep by name as belt-and-suspenders for processes whose /root
-# symlink can't be resolved (e.g. defunct entries during the read race).
+# After the mount-ns / overlay goes away, those same helpers often show
+# `root=/` and `cwd=/opt/portage-ng` (the in-chroot view) with PPID 1.
+# progress then reports PROC 0 and the path walk above misses them. The
+# 2026-08-26 leftovers (`ebuild --skip-manifest … configure`, ~93% CPU
+# for 18 days) were this shape. A second pass reaps PPID-1 processes
+# whose cmdline matches the Portage leftover patterns, including
+# `ebuild --skip-manifest` (not just ebuild-ipc.py / die_hooks).
+# Live compares keep a real parent, so PPID 1 is the safety gate —
+# we never pgrep -f these strings (self-match).
+
+# Safe /proc/<pid>/cmdline read. Brace-group 2>/dev/null so bash's own
+# redirection failure (PID exited between the glob and this read) cannot
+# abort the script under set -e. Same pattern as _progress_render_frame.
+_proc_cmdline() {
+  local p="$1"
+  { tr '\0' ' ' <"$p/cmdline" | head -c 160; } 2>/dev/null || true
+}
+
+# Portage helpers that busy-wait on a dead ebuild-ipc FIFO/socket.
+_is_portage_orphan_cmd() {
+  case "$1" in
+    *ebuild\ --skip-manifest*) return 0 ;;
+    *ebuild-ipc.py*)           return 0 ;;
+    *misc-functions.sh\ die_hooks*) return 0 ;;
+    *pid-ns-init*)             return 0 ;;
+    *)                         return 1 ;;
+  esac
+}
 
 sweep_session_orphans() {
   local name="$1"
   local sess_path
   sess_path="$(readlink -f "$(session_dir "$name")" 2>/dev/null \
                 || session_dir "$name")"
-  [[ -d "$sess_path" ]] || return 0
 
   local self_pid=$$
-  local killed=0 p pid root cmd
-  for p in /proc/[0-9]*; do
-    pid="${p##/proc/}"
-    [[ "$pid" == "$self_pid" ]] && continue
-    root="$(readlink "$p/root" 2>/dev/null)" || continue
-    [[ -n "$root" ]] || continue
-    case "$root" in
-      "$sess_path"|"$sess_path"/*)
-        # Brace-group 2>/dev/null so bash's own redirection failure
-        # (PID exited between the /proc glob and this read) cannot abort
-        # the script under set -e. A bare `tr … <"$p/cmdline" 2>/dev/null`
-        # still lets bash print-and-die on the redirect; that aborted
-        # compare after chromium's 12h timeout and skipped cmd_destroy
-        # (18G leftover session). Same pattern as _progress_render_frame.
-        cmd="$({ tr '\0' ' ' <"$p/cmdline" | head -c 120; } 2>/dev/null)" || cmd=""
-        log_warn "session '$name': reaping orphan PID $pid: ${cmd:-<unknown>}"
-        kill -9 "$pid" 2>/dev/null && killed=$((killed + 1))
-        ;;
-    esac
-  done
+  local killed=0 detached=0 p pid root cmd ppid
 
-  for pat in 'ebuild-ipc.py' 'misc-functions.sh die_hooks'; do
-    while read -r pid; do
-      [[ -n "$pid" ]] || continue
+  if [[ -d "$sess_path" ]]; then
+    for p in /proc/[0-9]*; do
+      pid="${p##/proc/}"
       [[ "$pid" == "$self_pid" ]] && continue
-      root="$(readlink "/proc/$pid/root" 2>/dev/null)" || continue
+      root="$(readlink "$p/root" 2>/dev/null)" || continue
+      [[ -n "$root" ]] || continue
       case "$root" in
         "$sess_path"|"$sess_path"/*)
-          cmd="$({ tr '\0' ' ' <"/proc/$pid/cmdline" | head -c 120; } 2>/dev/null)" || cmd=""
+          cmd="$(_proc_cmdline "$p")"
           log_warn "session '$name': reaping orphan PID $pid: ${cmd:-<unknown>}"
           kill -9 "$pid" 2>/dev/null && killed=$((killed + 1))
           ;;
       esac
-    done < <(pgrep -f "$pat" 2>/dev/null)
+    done
+  fi
+
+  # Detached: parent unshare/swipl is gone, chroot root no longer points
+  # at the session dir. Only PPID 1 + a Portage leftover cmdline.
+  for p in /proc/[0-9]*; do
+    pid="${p##/proc/}"
+    [[ "$pid" == "$self_pid" ]] && continue
+    ppid="$({ awk '/^PPid:/{print $2; exit}' "$p/status"; } 2>/dev/null)" || continue
+    [[ "$ppid" == 1 ]] || continue
+    cmd="$(_proc_cmdline "$p")"
+    _is_portage_orphan_cmd "$cmd" || continue
+    log_warn "reaping detached portage orphan PID $pid: ${cmd:-<unknown>}"
+    kill -9 "$pid" 2>/dev/null && detached=$((detached + 1))
   done
 
   if (( killed > 0 )); then
     log_info "session '$name': reaped $killed orphan process(es)"
+  fi
+  if (( detached > 0 )); then
+    log_info "reaped $detached detached portage orphan(s)"
   fi
   return 0
 }
