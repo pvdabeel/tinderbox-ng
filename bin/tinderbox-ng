@@ -607,7 +607,13 @@ sweep_session_orphans() {
     [[ -n "$root" ]] || continue
     case "$root" in
       "$sess_path"|"$sess_path"/*)
-        cmd="$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null | head -c 120)"
+        # Brace-group 2>/dev/null so bash's own redirection failure
+        # (PID exited between the /proc glob and this read) cannot abort
+        # the script under set -e. A bare `tr … <"$p/cmdline" 2>/dev/null`
+        # still lets bash print-and-die on the redirect; that aborted
+        # compare after chromium's 12h timeout and skipped cmd_destroy
+        # (18G leftover session). Same pattern as _progress_render_frame.
+        cmd="$({ tr '\0' ' ' <"$p/cmdline" | head -c 120; } 2>/dev/null)" || cmd=""
         log_warn "session '$name': reaping orphan PID $pid: ${cmd:-<unknown>}"
         kill -9 "$pid" 2>/dev/null && killed=$((killed + 1))
         ;;
@@ -621,7 +627,7 @@ sweep_session_orphans() {
       root="$(readlink "/proc/$pid/root" 2>/dev/null)" || continue
       case "$root" in
         "$sess_path"|"$sess_path"/*)
-          cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | head -c 120)"
+          cmd="$({ tr '\0' ' ' <"/proc/$pid/cmdline" | head -c 120; } 2>/dev/null)" || cmd=""
           log_warn "session '$name': reaping orphan PID $pid: ${cmd:-<unknown>}"
           kill -9 "$pid" 2>/dev/null && killed=$((killed + 1))
           ;;
