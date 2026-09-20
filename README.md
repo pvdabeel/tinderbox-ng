@@ -57,6 +57,7 @@ tinderbox-ng/
 │   ├── deploy-host.sh                 #   one-shot host install (git clone + symlink + doctor)
 │   ├── deploy-baseline.sh             #   safe scp of a single template (with @-token substitution)
 │   ├── render-compare-matrix.py       #   render compare-matrix TSVs to Markdown
+│   ├── gen-manifest-from-kb.py        #   kb → package or ebuild compare-matrix manifest
 │   └── easy-pkgs.sh                   #   small smoke driver over a curated package list
 │
 └── reports/                           # Historical compare-matrix snapshots (Markdown)
@@ -541,6 +542,7 @@ manifests live in `share/tinderbox-ng/`:
 | `manifest-1000.txt`         |   1000 | Standard release-comparison run, ~a day.      |
 | `manifest-all.txt`          |  19243 | Legacy tree-scanned cat/pn list.              |
 | `manifest-all-packages.txt` |  19285 | **Preferred** kb-derived cat/pn list (matches `kb.qlf`). |
+| `manifest-all-ebuilds*.txt` | (kb) | Every `=cat/pn-ver` in the kb. Generated on the VM, not shipped. |
 
 Regenerate `manifest-all-packages.txt` after `refresh-kb` (or any kb
 rebuild) so the manifest tracks exactly what portage-ng loaded:
@@ -550,6 +552,21 @@ rebuild) so the manifest tracks exactly what portage-ng loaded:
 python3 contrib/gen-manifest-from-kb.py \\
   --kb /srv/tinderbox-ng/baseline/opt/portage-ng/Knowledge/kb.raw \\
   --out share/tinderbox-ng/manifest-all-packages.txt
+```
+
+An all-ebuild sweep tests every version the kb knows about. After an
+all-packages run, drop the versions that run already resolved so you do
+not rebuild the same CPV twice:
+
+```sh
+# on the VM: leftover =cat/pn-ver atoms, minus the all-packages CPVs
+python3 contrib/gen-manifest-from-kb.py --grain ebuild \\
+  --exclude-run /srv/tinderbox-ng/reports/compare-matrix-<stamp> \\
+  --out /srv/tinderbox-ng/manifests/manifest-all-ebuilds-remaining.txt
+
+ssh root@vm-linux.local 'screen -dmS tinderbox-ng \
+    compare-matrix --build --jobs 16 \
+    --manifest /srv/tinderbox-ng/manifests/manifest-all-ebuilds-remaining.txt'
 ```
 
 A full `--build` sweep over `manifest-all-packages.txt` takes days, so

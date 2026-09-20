@@ -71,6 +71,15 @@ When a baseline already exists, warns if
 .I /usr/src/linux/Module.symvers
 is absent (linux\-mod ebuilds will fail setup; run
 .B install\-kernel\-sources ).
+Heals
+.I $TINDERBOX_ROOT/shared/distfiles/git3\-src
+to mode 2775 owned by uid/gid 250 so
+.B git\-r3
+live ebuilds can unpack under
+.B FEATURES=userpriv
+(a root\-owned leftover makes
+.I mkdir
+fail with EPERM).
 .TP
 .B bootstrap
 Build the immutable baseline (stage3 + SWI\-Prolog +

@@ -212,6 +212,33 @@ require_dirs() {
   [[ -d "$BASELINE_DIR/usr" ]] || die "$BASELINE_DIR is not a populated baseline; run 'tinderbox-ng bootstrap' first"
 }
 
+# git-r3 live ebuilds unpack under $DISTFILES_DIR/git3-src as the portage
+# user (FEATURES=userpriv, uid/gid 250). The directory must be 2775
+# portage:portage so userpriv can mkdir new clones. Older matrix runs
+# (and a root-owned bootstrap) left it 0755 root:root, which makes unpack
+# fail with EPERM (`mkdir: cannot create directory '…/git3-src/….git'`).
+# Heal whenever we bind-mount distfiles so a clean compare never hits that.
+# Numeric chown so this works on hosts that don't have a `portage` user.
+# No-ops (and does not die) when we lack privileges — analyze/phase-stats
+# call require_dirs as a non-root host-side reader.
+_ensure_git3_src() {
+  local dir="$DISTFILES_DIR/git3-src"
+  mkdir -p "$DISTFILES_DIR" 2>/dev/null || return 0
+  install -d -m 2775 "$dir" 2>/dev/null || return 0
+  chown 250:250 "$dir" 2>/dev/null || true
+  chmod 2775 "$dir" 2>/dev/null || true
+}
+
+_git3_src_ok() {
+  local dir="$DISTFILES_DIR/git3-src"
+  [[ -d "$dir" ]] || return 1
+  local mode owner group
+  mode="$(stat -c '%a' "$dir" 2>/dev/null)" || return 1
+  owner="$(stat -c '%u' "$dir" 2>/dev/null)" || return 1
+  group="$(stat -c '%g' "$dir" 2>/dev/null)" || return 1
+  [[ "$mode" == "2775" && "$owner" == "250" && "$group" == "250" ]]
+}
+
 # -----------------------------------------------------------------------------
 # Preflight aggregation
 # -----------------------------------------------------------------------------
@@ -499,8 +526,10 @@ _ns_session_mount() {
   _mount_quiet --bind "$TREE_DIR" "$merged$CHROOT_TREE_PATH"
   mount -o remount,bind,ro "$merged$CHROOT_TREE_PATH"
 
-  # Distfiles (rw, persistent across sessions)
+  # Distfiles (rw, persistent across sessions). Heal git3-src before the
+  # bind so FEATURES=userpriv can mkdir live-ebuild clones.
   mkdir -p "$merged$CHROOT_DISTFILES_PATH" "$DISTFILES_DIR"
+  _ensure_git3_src
   _mount_quiet --bind "$DISTFILES_DIR" "$merged$CHROOT_DISTFILES_PATH"
 
   if [[ -d "$CCACHE_DIR" ]]; then
@@ -963,6 +992,24 @@ cmd_doctor() {
     fi
   fi
 
+  # git-r3 live ebuilds (FEATURES=userpriv) mkdir under git3-src as uid 250.
+  # Heal a root-owned leftover so doctor itself unblocks the next compare.
+  if [[ -d "$DISTFILES_DIR" ]]; then
+    if _git3_src_ok; then
+      log_ok "git3-src is 2775 portage:portage (git-r3 live ebuilds OK)"
+    else
+      _ensure_git3_src
+      if _git3_src_ok; then
+        log_ok "git3-src healed to 2775 portage:portage (was not writable by uid 250)"
+      else
+        log_warn "git3-src not writable by portage (uid 250); live ebuilds fail unpack"
+        log_warn "  checked: $DISTFILES_DIR/git3-src"
+        log_warn "  heal: install -d -m 2775 -o 250 -g 250 $DISTFILES_DIR/git3-src"
+        warn=$((warn+1))
+      fi
+    fi
+  fi
+
   if (( fail > 0 )); then
     die "preflight: $fail error(s), $warn warning(s); fix errors before bootstrap"
   fi
@@ -1029,6 +1076,7 @@ cmd_bootstrap() {
 
   mkdir -p "$BASELINE_DIR" "$SHARED_DIR" "$SESSIONS_DIR" "$SCRIPTS_DIR" "$LOG_DIR" \
            "$STAGE3_CACHE" "$DISTFILES_DIR" "$CCACHE_DIR" "$BINPKGS_DIR"
+  _ensure_git3_src
 
   bootstrap_fetch_stage3
   bootstrap_unpack_stage3
@@ -1304,10 +1352,7 @@ bootstrap_upgrade_portage() {
   }
 
   log_info "emerge $target into baseline (live Portage for emerge-side compares)"
-  # git-r3 live ebuilds unpack under $DISTFILES_DIR/git3-src/ as the portage
-  # user (FEATURES=userpriv). Older matrix runs left that directory root:root
-  # 0755, which makes mkdir fail with EPERM during bootstrap_upgrade_portage.
-  install -d -m 2775 -o 250 -g 250 "$DISTFILES_DIR/git3-src"
+  _ensure_git3_src
   in_baseline_chroot bash -e <<EOF
 . /etc/profile
 emerge --quiet-build=y --jobs="\$(nproc)" --load-average="\$(nproc)" \
@@ -2077,6 +2122,7 @@ cmd_new() {
   # that don't have a `portage` user defined.
   install -d -m 2775 "$(session_portage_tmpdir "$name")"
   chown 250:250 "$(session_portage_tmpdir "$name")" 2>/dev/null || true
+  _ensure_git3_src
   printf '%s\n' "created=$(date -Iseconds)" >"$(session_dir "$name")/info"
   log_ok "session '$name' created"
 }
@@ -4833,6 +4879,7 @@ _ns_baseline_mount() {
     mount -o remount,bind,ro "$M$CHROOT_TREE_PATH"
   fi
 
+  _ensure_git3_src
   _mount_quiet --bind "$DISTFILES_DIR" "$M$CHROOT_DISTFILES_PATH"
 
   # Bind the shared binpkgs cache so portage-ng's `--sync` (run via refresh-kb
