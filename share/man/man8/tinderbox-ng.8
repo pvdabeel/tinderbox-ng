@@ -192,13 +192,23 @@ into an existing baseline:
 .IR baseline.make.conf ,
 .IR baseline.repos.conf ,
 .IR baseline.package.use ,
+.IR baseline.package.accept_keywords ,
 and
-.IR baseline.package.accept_keywords
+.IR baseline.gitconfig
 (via
 .IR cp_template ,
 including
 .B @NPROC@
-substitution), then idempotently re-emerge the live Portage atom when
+substitution).
+.I baseline.gitconfig
+is installed as
+.I /etc/gitconfig
+with
+.B safe.directory=*
+so live ebuilds can run
+.B git
+in a portage\-owned WORKDIR as root.
+Then idempotently re-emerge the live Portage atom when
 .B TINDERBOX_BASELINE_PORTAGE_TARGET
 is set.
 Cheap for templates; the Portage step is a no-op when already installed.
@@ -753,9 +763,32 @@ passes (legacy; two cold starts per compare).
 .B TINDERBOX_BUILD_TIMEOUT
 Per\-package build timeout in seconds for
 .B compare
-(default 43200, i.e. 12 hours) and for the
+(default 86400, i.e. 24 hours) and for the
 .BR pn / em
 standalone runs.
+.TP
+.B TINDERBOX_MATRIX_HEAVY_JOBS
+Maximum number of concurrent heavy compare workers in a
+.B compare\-matrix
+/
+.B continue
+run (default 2).
+A leftover all\-ebuilds wave can otherwise schedule a dozen
+.I webkit\-gtk
+slot variants at once; each then gets a couple of cores and trips the
+build timeout while still compiling.
+Heavy atoms:
+.IR webkit\-gtk ,
+.IR firefox ,
+.IR chromium ,
+.IR qtwebengine ,
+.IR thunderbird ,
+.IR libreoffice ,
+.IR dev\-lang/rust
+(not rust\-common / rust\-bin),
+.IR llvm\-core/llvm ,
+.IR llvm\-core/clang ,
+.IR sys\-devel/gcc .
 .TP
 .B TINDERBOX_MDNS_HOSTS
 Space\-separated hostnames that must resolve from inside the chroot (the
@@ -1084,7 +1117,12 @@ Run
 .B "tinderbox\-ng doctor"
 first when something is unexpectedly broken; it aggregates every host
 prerequisite (kernel module, tools, free space, template existence, default
-profile) into a single report.
+profile) into a single report. It also heals
+.I git3\-src
+permissions and
+.I /etc/gitconfig
+.B safe.directory=*
+when the baseline is writable.
 .PP
 .B "tinderbox\-ng status"
 prints global state (paths, pinned tree commit, baseline frozen?, sizes of

@@ -25,13 +25,16 @@
 #
 # `--jobs N` runs N package comparisons concurrently. Each comparison
 # itself spawns 2 sessions (portage-ng + emerge in parallel mount
-# namespaces), so the actual session count peaks at 2N. portage-ng always
-# runs `--mode standalone` (never ipc): parallel matrix workers need
-# session-isolated VDBs; issue #80 speedups (mtime-gated binpkg refresh)
-# apply automatically after refresh-portage-ng @ 4ba5099c+. The vm-linux
-# baseline easily handles N=8 on a 32-core box, and N=16 with the
-# sessions tmpfs at 100G; tune to keep load under (cores - small
-# headroom).
+# namespaces), so the actual session count peaks at 2N. Heavy source
+# builds (webkit-gtk, firefox, rust, llvm, gcc, …) are additionally
+# capped by TINDERBOX_MATRIX_HEAVY_JOBS (default 2) so a leftover
+# exact-ebuild wave cannot fill every slot with multi-hour compiles.
+# portage-ng always runs `--mode standalone` (never ipc): parallel
+# matrix workers need session-isolated VDBs; issue #80 speedups
+# (mtime-gated binpkg refresh) apply automatically after
+# refresh-portage-ng @ 4ba5099c+. The vm-linux baseline easily handles
+# N=8 on a 32-core box, and N=16 with the sessions tmpfs at 100G; tune
+# to keep load under (cores - small headroom).
 #
 # Output goes to /srv/tinderbox-ng/reports/compare-matrix-<stamp>/.
 # The TSV is written incrementally, one row per package (mutex-locked
@@ -330,8 +333,32 @@ _run_one() {
   return "$mismatch"
 }
 
+# Multi-hour source builds. A leftover `=cat/pn-ver` wave can otherwise
+# schedule every webkit-gtk SLOT variant at once; each compile then
+# gets 2–3 cores and the 24h build timeout still loses. Override the
+# match list via TINDERBOX_MATRIX_HEAVY_REGEX (bash ERE against the
+# raw manifest atom). rust-common / rust-bin are *not* heavy.
+_cm_is_heavy() {
+  local re="${TINDERBOX_MATRIX_HEAVY_REGEX:-}"
+  if [[ -n "$re" ]]; then
+    [[ "$1" =~ $re ]]
+    return
+  fi
+  case "$1" in
+    *dev-lang/rust-common*|*dev-lang/rust-bin*) return 1 ;;
+    *webkit-gtk*|*www-client/firefox*|*www-client/chromium* \
+    |*www-client/qtwebengine*|*mail-client/thunderbird* \
+    |*app-office/libreoffice*|*dev-lang/rust* \
+    |*llvm-core/llvm*|*llvm-core/clang*|*sys-devel/gcc*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 mismatches=0
 total=${#PACKAGES[@]}
+HEAVY_JOBS="${TINDERBOX_MATRIX_HEAVY_JOBS:-2}"
+[[ "$HEAVY_JOBS" =~ ^[0-9]+$ && "$HEAVY_JOBS" -ge 1 ]] || HEAVY_JOBS=2
+if (( HEAVY_JOBS > JOBS )); then HEAVY_JOBS=$JOBS; fi
 
 if [[ "$JOBS" -le 1 ]]; then
   # Serial path (preserves the prior layout for single-job runs)
@@ -348,32 +375,54 @@ if [[ "$JOBS" -le 1 ]]; then
 else
   # Parallel path: dispatch JOBS workers consuming from a shared index.
   # We use a FIFO queue file as a lightweight pipe of indices.
-  printf '[parallel] dispatching %d packages with --jobs %d\n' "$total" "$JOBS"
+  printf '[parallel] dispatching %d packages with --jobs %d (heavy cap %d)\n' \
+    "$total" "$JOBS" "$HEAVY_JOBS"
 
   # Slot-by-slot wave dispatch: launch up to JOBS workers, wait for any
-  # to finish, then launch the next. Bash 5+ has `wait -n -p`, but for
-  # portability we use a polling-free approach with `wait -n`.
+  # to finish, then launch the next. Heavy atoms also wait for a heavy
+  # slot (TINDERBOX_MATRIX_HEAVY_JOBS). Bash 5+ has `wait -n -p`, but
+  # for portability we use a polling-free approach with `wait -n`.
   declare -a child_pids=()
+  declare -a heavy_pids=()
   pkgi=0
+
+  _cm_reap_children() {
+    local rc="$1" p
+    local -a alive_pids=() alive_heavy=()
+    [[ $rc -ne 0 && $rc -ne 127 ]] && mismatches=$((mismatches + 1))
+    for p in "${child_pids[@]}"; do
+      if kill -0 "$p" 2>/dev/null; then
+        alive_pids+=("$p")
+      fi
+    done
+    child_pids=("${alive_pids[@]}")
+    for p in "${heavy_pids[@]+"${heavy_pids[@]}"}"; do
+      if kill -0 "$p" 2>/dev/null; then
+        alive_heavy+=("$p")
+      fi
+    done
+    heavy_pids=("${alive_heavy[@]}")
+  }
+
   for pkg in "${PACKAGES[@]}"; do
     pkgi=$((pkgi + 1))
-    # If we already have JOBS workers running, wait for one to finish.
-    while [[ ${#child_pids[@]} -ge $JOBS ]]; do
-      set +e; wait -n; rc=$?; set -e
-      [[ $rc -ne 0 && $rc -ne 127 ]] && mismatches=$((mismatches + 1))
-      # Reap finished pids by checking which ones are still alive.
-      alive_pids=()
-      for p in "${child_pids[@]}"; do
-        if kill -0 "$p" 2>/dev/null; then
-          alive_pids+=("$p")
+    while true; do
+      if (( ${#child_pids[@]} < JOBS )); then
+        if _cm_is_heavy "$pkg"; then
+          (( ${#heavy_pids[@]} < HEAVY_JOBS )) && break
+        else
+          break
         fi
-      done
-      child_pids=("${alive_pids[@]}")
+      fi
+      set +e; wait -n; rc=$?; set -e
+      _cm_reap_children "$rc"
     done
 
-    # Launch the next worker.
     _run_one "$pkgi" "$pkg" "$total" &
     child_pids+=("$!")
+    if _cm_is_heavy "$pkg"; then
+      heavy_pids+=("$!")
+    fi
   done
 
   # Drain the remaining workers.

@@ -1,0 +1,18 @@
+# /etc/gitconfig -- shipped by tinderbox-ng bootstrap
+#
+# Live ebuilds run `git describe` (and friends) in WORKDIR. git-r3 clones
+# live under /var/cache/distfiles/git3-src as uid 250, and session
+# /var/tmp/portage is 2775 portage:portage, but baseline FEATURES has no
+# userpriv so ebuild phases run as root. Git 2.35+ then refuses those
+# trees ("fatal: detected dubious ownership").
+#
+# System gitconfig is read regardless of HOME. git-r3 only adds
+# safe.directory via `git config --global` (~/.gitconfig), which the
+# next phase does not see when HOME/uid differ.
+#
+# `*` is required: git matches the repository path, not a parent, so
+# listing /var/tmp/portage alone does not cover
+# /var/tmp/portage/cat/pkg-ver/work/pkg-ver.
+
+[safe]
+	directory = *

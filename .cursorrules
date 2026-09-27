@@ -67,6 +67,8 @@ exactly one home, decided by *who runs it and why*.
   and manifest fixtures. Nothing executable lives here.
   - `baseline.make.conf`, `baseline.package.use`, `baseline.package.accept_keywords`, `baseline.repos.conf`:
     `/etc/portage/` config copied into the baseline at bootstrap.
+  - `baseline.gitconfig`: `/etc/gitconfig` with `safe.directory = *` so live
+    ebuilds can run `git` in a uid-250 WORKDIR while phases run as root.
   - `portage-ng-dev.in`: in-chroot launcher template (with `@NPROC@`,
     `@GENTOO_PROFILE@`, `@PORTAGE_NG_ROOT@` token substitution applied
     by `cp_template`).

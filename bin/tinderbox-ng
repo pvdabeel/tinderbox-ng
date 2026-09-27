@@ -79,7 +79,7 @@ _pn_portage_ng_cmd() {
     to="$1"
     shift
   else
-    to="${TINDERBOX_BUILD_TIMEOUT:-43200}"
+    to="${TINDERBOX_BUILD_TIMEOUT:-86400}"
   fi
   mode_flag="$1"
   shift
@@ -239,6 +239,32 @@ _git3_src_ok() {
   [[ "$mode" == "2775" && "$owner" == "250" && "$group" == "250" ]]
 }
 
+# Git 2.35+ refuses a repo owned by another uid. Live ebuilds then die in
+# install/compile with "detected dubious ownership" under
+# /var/tmp/portage/.../work (and git3-src clones). System /etc/gitconfig
+# is visible to every HOME/uid; `directory = *` is required because git
+# matches the repository path, not a parent. No-ops when the baseline is
+# missing or not writable (analyze as a non-root reader; frozen baseline).
+_git_safe_directory_ok() {
+  local cfg="$BASELINE_DIR/etc/gitconfig"
+  [[ -f "$cfg" ]] || return 1
+  grep -Eq '^[[:space:]]*directory[[:space:]]*=[[:space:]]*"?\*"?' "$cfg"
+}
+
+_ensure_git_safe_directory() {
+  local cfg="$BASELINE_DIR/etc/gitconfig"
+  [[ -d "$BASELINE_DIR/etc" ]] || return 0
+  if _git_safe_directory_ok; then
+    return 0
+  fi
+  [[ -w "$BASELINE_DIR/etc" ]] || return 0
+  if [[ -f "$cfg" && ! -w "$cfg" ]]; then
+    return 0
+  fi
+  [[ -f "$SHARE_DIR/baseline.gitconfig" ]] || return 0
+  cp_template baseline.gitconfig "$cfg"
+}
+
 # -----------------------------------------------------------------------------
 # Preflight aggregation
 # -----------------------------------------------------------------------------
@@ -273,6 +299,7 @@ TINDERBOX_REQUIRED_TEMPLATES=(
   baseline.package.env
   baseline.env.no-rbql.conf
   baseline.repos.conf
+  baseline.gitconfig
   portage-ng-dev.in
   manifest-100.txt
   manifest-1000.txt
@@ -530,6 +557,7 @@ _ns_session_mount() {
   # bind so FEATURES=userpriv can mkdir live-ebuild clones.
   mkdir -p "$merged$CHROOT_DISTFILES_PATH" "$DISTFILES_DIR"
   _ensure_git3_src
+  _ensure_git_safe_directory
   _mount_quiet --bind "$DISTFILES_DIR" "$merged$CHROOT_DISTFILES_PATH"
 
   if [[ -d "$CCACHE_DIR" ]]; then
@@ -1010,6 +1038,24 @@ cmd_doctor() {
     fi
   fi
 
+  # Live-ebuild `git describe` in WORKDIR: root vs uid-250 ownership.
+  if [[ -d "$BASELINE_DIR/etc" ]]; then
+    if _git_safe_directory_ok; then
+      log_ok "baseline /etc/gitconfig allows safe.directory=* (live ebuild git OK)"
+    else
+      _ensure_git_safe_directory
+      if _git_safe_directory_ok; then
+        log_ok "baseline /etc/gitconfig healed with safe.directory=* (was missing)"
+      else
+        log_warn "baseline /etc/gitconfig lacks safe.directory=*; live ebuilds fail install (dubious ownership)"
+        log_warn "  checked: $BASELINE_DIR/etc/gitconfig"
+        log_warn "  heal: tinderbox-ng refresh-baseline-config"
+        log_warn "  or, if frozen: tinderbox-ng baseline-thaw"
+        warn=$((warn+1))
+      fi
+    fi
+  fi
+
   if (( fail > 0 )); then
     die "preflight: $fail error(s), $warn warning(s); fix errors before bootstrap"
   fi
@@ -1336,6 +1382,7 @@ _bootstrap_apply_portage_templates() {
       "$BASELINE_DIR/etc/portage/package.accept_keywords/00-tinderbox-ng-defaults"
   cp_template baseline.package.env "$BASELINE_DIR/etc/portage/package.env/00-tinderbox-ng-defaults"
   cp_template baseline.env.no-rbql.conf "$BASELINE_DIR/etc/portage/env/tinderbox-ng-no-rbql.conf"
+  cp_template baseline.gitconfig "$BASELINE_DIR/etc/gitconfig"
   _baseline_sync_ccache_feature
 }
 
@@ -2067,7 +2114,8 @@ cmd_baseline_thaw() {
 # =============================================================================
 #
 # Re-apply the shipped /etc/portage templates (make.conf, repos.conf,
-# package.use / package.accept_keywords / package.env defaults) from share/tinderbox-ng/
+# package.use / package.accept_keywords / package.env defaults) and
+# /etc/gitconfig (safe.directory=*) from share/tinderbox-ng/
 # into the existing baseline, then idempotently re-emerge the live Portage
 # atom when TINDERBOX_BASELINE_PORTAGE_TARGET is set. Cheap for templates;
 # the Portage step is a no-op when already installed. Does not touch kb.qlf
@@ -2097,6 +2145,7 @@ cmd_refresh_baseline_config() {
   log_info "  $BASELINE_DIR/etc/portage/package.accept_keywords/00-tinderbox-ng-defaults"
   log_info "  $BASELINE_DIR/etc/portage/package.env/00-tinderbox-ng-defaults"
   log_info "  $BASELINE_DIR/etc/portage/env/tinderbox-ng-no-rbql.conf"
+  log_info "  $BASELINE_DIR/etc/gitconfig"
   bootstrap_upgrade_portage
   log_info "new compare sessions inherit the update via the baseline lower layer"
 }
@@ -2123,6 +2172,7 @@ cmd_new() {
   install -d -m 2775 "$(session_portage_tmpdir "$name")"
   chown 250:250 "$(session_portage_tmpdir "$name")" 2>/dev/null || true
   _ensure_git3_src
+  _ensure_git_safe_directory
   printf '%s\n' "created=$(date -Iseconds)" >"$(session_dir "$name")/info"
   log_ok "session '$name' created"
 }
@@ -2258,7 +2308,7 @@ cmd_emerge() {
   # Default to --oneshot so we don't pollute @world. Caller can override
   # by passing their own emerge atoms/flags after the session name.
   local emerge_flags="--color=y --oneshot --verbose"
-  local cmd="timeout ${TINDERBOX_BUILD_TIMEOUT:-43200} /usr/bin/emerge $emerge_flags $*"
+  local cmd="timeout ${TINDERBOX_BUILD_TIMEOUT:-86400} /usr/bin/emerge $emerge_flags $*"
   cmd_exec "$name" -- "$cmd"
 }
 
@@ -2717,7 +2767,7 @@ cmd_compare() {
   # explicitly we still honour that as the upper bound for the plan pass
   # (`min(plan_default, build)` semantics) so we don't surprise anyone who
   # tightened the knob to a small value to bound a quick smoke matrix.
-  local BUILD_TO="${TINDERBOX_BUILD_TIMEOUT:-43200}"
+  local BUILD_TO="${TINDERBOX_BUILD_TIMEOUT:-86400}"
   local PLAN_TO="${TINDERBOX_PLAN_TIMEOUT:-1800}"
   if (( PLAN_TO > BUILD_TO )); then PLAN_TO="$BUILD_TO"; fi
   local pn_plan_cmd pn_build_cmd pn_single_cmd
@@ -4880,6 +4930,7 @@ _ns_baseline_mount() {
   fi
 
   _ensure_git3_src
+  _ensure_git_safe_directory
   _mount_quiet --bind "$DISTFILES_DIR" "$M$CHROOT_DISTFILES_PATH"
 
   # Bind the shared binpkgs cache so portage-ng's `--sync` (run via refresh-kb
@@ -5001,8 +5052,8 @@ Subcommands:
                            doctor` warns when this is needed.
   refresh-baseline-config  Re-apply share/tinderbox-ng portage templates
                            (make.conf, repos.conf, package.use,
-                           package.accept_keywords, package.env) into an
-                           existing baseline,
+                           package.accept_keywords, package.env, gitconfig)
+                           into an existing baseline,
                            then idempotently re-emerge the live Portage atom
                            when TINDERBOX_BASELINE_PORTAGE_TARGET is set.
                            Picks up template fixes without TINDERBOX_REBOOTSTRAP=1.
@@ -5122,9 +5173,18 @@ Environment:
                                   the log. Set 0 to use separate --pretend
                                   and --build passes (legacy, slower).
   TINDERBOX_BUILD_TIMEOUT         Per-package build timeout in seconds
-                                  (default 43200 = 12h). Used by `compare`'s
+                                  (default 86400 = 24h). Used by `compare`'s
                                   --build pass for both engines, and by
-                                  `pn`/`em` standalone runs.
+                                  `pn`/`em` standalone runs. 12h was too
+                                  short for leftover exact webkit-gtk /
+                                  llvm / rust source builds when several
+                                  run at once.
+  TINDERBOX_MATRIX_HEAVY_JOBS     Max concurrent "heavy" compare workers
+                                  in compare-matrix (default 2). Caps
+                                  webkit-gtk / firefox / chromium /
+                                  thunderbird / libreoffice / rust /
+                                  llvm / gcc source builds so they do
+                                  not all take --jobs slots at once.
   TINDERBOX_LIBEXEC_DIR           Override location of executable helpers
                                   (default $SCRIPT_DIR/../libexec/tinderbox-ng).
   TINDERBOX_SHARE_DIR             Override location of data templates
