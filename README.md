@@ -309,6 +309,16 @@ checkout (against commit `4ba5099c`):
   `bin/tinderbox-ng`. The override is idempotent: if the host config
   already declares `config:binpkg_refresh/1` (e.g. an operator
   deliberately set `manual`), tinderbox-ng leaves it alone.
+- The same deploy step moves `binpkg_index.pl` from `builder_modules`
+  into `domain_modules` in `Source/loader.pl`
+  (`_patch_portage_ng_loader`). `refresh-kb` / bootstrap `--sync` calls
+  `binpkg_index:parse_file/3` before builder modules load; upstream
+  leaving that consult in `builder_modules` makes every fresh
+  `deploy-host.sh --bootstrap` die with
+  `Unknown procedure: binpkg_index:parse_file/3`. `git reset --hard`
+  restores the upstream file, so the move is re-applied on every
+  `bootstrap` and `refresh-portage-ng`. No-op once upstream loads it
+  with the domain group.
 
   Wired upstream as of portage-ng commit `76730972` ("binpkg: honor
   `config:binpkg_refresh/1` in `available_for/4`"): every dispatch
@@ -413,7 +423,12 @@ reads that table at compare time (from the baseline copy under
 | 124 / 137 / 143 | `TIMEOUT` / `KILLED(...)` | watchdog / signal |
 
 Log-based reclassifiers in `_compare_summarize` may further override labels
-(e.g. `RESTRICT(fetch)`, `INFRA(overlay-inode-flicker)`).
+(e.g. `RESTRICT(fetch)`, `INFRA(overlay-inode-flicker)`, `INFRA(ENOSPC)`).
+`INFRA(ENOSPC)` means the engine died on a full sessions tmpfs or
+distfiles volume (`No space left on device` / wget `Cannot write …
+(Success)`); progress counts those in a separate ENOSPC bucket, not
+fail/fail or fail/ok. Re-tag an already-written TSV with
+`tinderbox-ng reclassify-enospc --run DIR`.
 
 `compare-matrix.sh` and `_compare_summarize` treat any label matching
 `OK` or `OK(...)` as "plan produced". If you add codes to `exitcodes.pl`

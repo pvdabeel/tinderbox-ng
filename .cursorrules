@@ -45,6 +45,10 @@ exactly one home, decided by *who runs it and why*.
     portage-ng merge set. Ignores PN-only BDEPEND extras that inflate
     raw upper-VDB counts when emerge takes binpkgs. Invoked by
     `compare` (per-session table row) and `tinderbox-ng binpkg-adjusted`.
+  - `reclassify-enospc.py`: log-based `INFRA(ENOSPC)` detector. Used
+    by `_compare_summarize` (`--check LOGDIR`) and
+    `tinderbox-ng reclassify-enospc --run DIR` to backfill
+    `results.tsv`.
   - `extract-timing.py` (~470 lines): walks compare session log dirs
     and emits a JSON report comparing portage-ng vs emerge wall-clock
     timing per pass (plan/build) plus pn/em ratios, head-to-head
@@ -123,7 +127,7 @@ internal layer for chroot/overlay/mount-namespace plumbing.
 7. Observability: `status`, `progress` (alias `monitor`),
    `analyze` (alias `analyse`), `phase-stats` (alias `phase_stats` /
    `consolidate-phase-stats`), `extract-timing` (alias `timing` /
-   `extract_timing`).
+   `extract_timing`), `reclassify-enospc` (alias `reclassify_enospc`).
 8. Internal: `__ns-helper` is the re-entry point inside
    `unshare --mount --ipc --propagation=private`. Never invoked by users.
 
@@ -174,14 +178,17 @@ extract-timing --run <run>  ─►  libexec/tinderbox-ng/extract-timing.py
 
 binpkg-adjusted --run <run> ─►  libexec/tinderbox-ng/binpkg-adjusted.py
                                   emerge [binary] CPV ⊆ portage-ng merge set
+
+reclassify-enospc --run <run> ─► libexec/tinderbox-ng/reclassify-enospc.py
+                                  FAIL(*) → INFRA(ENOSPC) in results.tsv
 ```
 
 Per-session compare logs land in
 `/srv/tinderbox-ng/logs/compare-<label>-<stamp>/`. Matrix-run reports
 land in `/srv/tinderbox-ng/reports/compare-matrix-<stamp>/`. All of
-`analyze`, `phase-stats`, `extract-timing` and `binpkg-adjusted`
-auto-detect the most recent matrix run when invoked without `--run` /
-`--logdir`.
+`analyze`, `phase-stats`, `extract-timing`, `binpkg-adjusted` and
+`reclassify-enospc` auto-detect the most recent matrix run when
+invoked without `--run` / `--logdir`.
 
 `<log>.timing` companion files are written by `_compare_run_pass`
 inside `cmd_compare`. Format is key=value, one pair per line:
@@ -420,6 +427,7 @@ python3 -m py_compile libexec/tinderbox-ng/compare-merge-emerge.py
 python3 -m py_compile libexec/tinderbox-ng/consolidate-phase-stats.py
 python3 -m py_compile libexec/tinderbox-ng/extract-timing.py
 python3 -m py_compile libexec/tinderbox-ng/binpkg-adjusted.py
+python3 -m py_compile libexec/tinderbox-ng/reclassify-enospc.py
 python3 -m py_compile contrib/render-compare-matrix.py
 
 # Manpage lint (clean run, no warnings):
@@ -520,6 +528,15 @@ produced by their predecessors, two invariants must hold:
 
 If you see "No Packages index at /srv/tinderbox-ng/shared/binpkgs/Packages"
 in `refresh-kb` output, one of the above is broken.
+
+`refresh-kb` also calls `binpkg_index:parse_file/3` while only
+`domain_modules` are loaded. Upstream lists `binpkg_index.pl` under
+`builder_modules`, so a stock checkout dies with
+`Unknown procedure: binpkg_index:parse_file/3`.
+`_patch_portage_ng_loader` moves that consult into `domain_modules`
+on every `bootstrap` and `refresh-portage-ng` (git reset would
+otherwise put it back). Do not hand-edit the baseline `loader.pl`
+and expect it to survive the next deploy.
 
 ### gentoo-sources baseline
 

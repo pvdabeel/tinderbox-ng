@@ -18,8 +18,8 @@ Failure (FAIL(*) matches emerge's FAIL(N) shape):
   *                    -> FAIL(N)
 
 Special (handled by tinderbox-ng after this helper returns):
-  RESTRICT(fetch), INFRA(overlay-inode-flicker) — log-based reclassifiers in
-  _compare_summarize overwrite FAIL(build) when applicable.
+  RESTRICT(fetch), INFRA(overlay-inode-flicker), INFRA(ENOSPC) — log-based
+  reclassifiers in _compare_summarize overwrite FAIL(build) when applicable.
 """
 
 from __future__ import annotations

@@ -135,6 +135,17 @@ artefacts (see
 survive untouched.
 Does NOT regenerate
 .IR kb.qlf .
+Re\-applies the tinderbox deploy patches
+.B git reset
+just wiped: host binpkg paths /
+.BR config:binpkg_refresh (mtime),
+and moving
+.I binpkg_index.pl
+into
+.B domain_modules
+so the next
+.B refresh\-kb
+can parse the Packages index.
 .TP
 .B install\-ccache
 Retrofit
@@ -334,7 +345,22 @@ table),
 during unpack \(em a documented OverlayFS bug under inode\-cache reclaim
 pressure; mostly mitigated by the per\-session
 .I /var/tmp/portage
-bind\-mount, but residual occurrences are tagged this way for accounting).
+bind\-mount, but residual occurrences are tagged this way for accounting),
+.B INFRA(ENOSPC)
+(ld / rustc / wget died with
+.RB \(dq "No space left on device" \(dq
+or wget's
+.RB \(dq "Cannot write … (Success)" \(dq
+\(em the shared sessions tmpfs or distfiles volume filled; the host root
+often still has hundreds of GiB free).
+.B progress
+counts
+.B INFRA(ENOSPC)
+in a separate ENOSPC bucket, not fail/fail or fail/ok.
+Re\-tag an already\-written
+.I results.tsv
+with
+.BR "tinderbox\-ng reclassify\-enospc" .
 Labels are resolved by
 .BI libexec/tinderbox-ng/portage-ng-exit-label.py
 (reading the baseline copy of portage-ng's
@@ -428,6 +454,16 @@ Default source is the most recent
 .B compare\-matrix
 run. Alias:
 .BR binpkg_adjusted .
+.TP
+.B "reclassify\-enospc " [ "\-\-run \fIDIR\fR" "] [" "\-\-dry\-run" "]"
+Rewrite
+.I results.tsv
+.B FAIL(*)
+labels to
+.B INFRA(ENOSPC)
+when the compare logdir shows a disk\-full death. New compares are
+tagged at summarize time; this backfills older rows. Alias:
+.BR reclassify_enospc .
 .TP
 .B "analyze " [ "\-\-run \fIDIR\fR" " | " "\-\-logdir \fIDIR\fR" "] [" "\-\-out \fIFILE\fR" "] [" "\-\-jobs \fIN\fR" "] [" "\-\-md5\-cache \fIDIR\fR" "] [" "\-\-target\-regex \fIRE\fR" "] [" "\-\-full\-lists" "]"
 Plan\-correctness analysis over a matrix run (or any directory of

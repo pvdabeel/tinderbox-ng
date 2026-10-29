@@ -65,8 +65,16 @@ _cm_pn_ok() {
 _cm_em_ok() {
   [[ "$1" == "OK" ]]
 }
-# PN failed where emerge succeeded (regression).
+_cm_infra() {
+  case "$1" in
+    RESTRICT*|INFRA*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# PN failed where emerge succeeded (regression). INFRA/RESTRICT are
+# host/metadata, not a resolver miss — do not paint those red.
 _cm_pn_regression() {
+  _cm_infra "$1" && return 1
   ! _cm_pn_ok "$1" && _cm_em_ok "$2"
 }
 # PN succeeded where emerge failed (PN-only win).

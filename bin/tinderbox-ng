@@ -1212,8 +1212,13 @@ bootstrap_fetch_stage3() {
 
   ( cd "$STAGE3_CACHE"
     log_info "fetching $tarball"
-    curl -fL --remote-name-all -C - "$url_tar" "$url_dig" "$url_asc" || \
-      curl -fL --remote-name-all "$url_tar" "$url_dig" "$url_asc"
+    # distfiles.gentoo.org occasionally drops the TLS session on the
+    # ~270MB tarball (curl 56 / unexpected eof). Retry the whole transfer,
+    # resume with -C -, and only fall back to a fresh GET if resume fails.
+    curl -fL --retry 8 --retry-all-errors --retry-delay 5 \
+        --remote-name-all -C - "$url_tar" "$url_dig" "$url_asc" || \
+      curl -fL --retry 8 --retry-all-errors --retry-delay 5 \
+        --remote-name-all "$url_tar" "$url_dig" "$url_asc"
 
     log_info "verifying GPG signature on $tarball"
     _bootstrap_import_releng_key "$STAGE3_CACHE/.gnupg"
@@ -1695,6 +1700,7 @@ EOF
   install -m 0755 "$LIBEXEC_DIR/run-matrix.sh" "$BASELINE_DIR/usr/local/bin/tinderbox-matrix"
 
   _patch_portage_ng_host_config
+  _patch_portage_ng_loader
 
   log_ok "portage-ng installed at $CHROOT_PORTAGE_NG"
 }
@@ -1835,6 +1841,75 @@ EOF
   log_info "  $host_cfg: appended config:binpkg_refresh(mtime) override"
 }
 
+# portage-ng --sync (bootstrap_install_kb_qlf / refresh-kb) calls
+# binpkg_index:parse_file/3 while only domain_modules are loaded.
+# Upstream lists Source/Domain/Gentoo/Binpkg/binpkg_index.pl in
+# builder_modules, which loader:ensure/1 pulls in later, for builds.
+# That is fine for a running merge and fatal for kb generation:
+#   ERROR: binpkg:'$__meta'/1: Unknown procedure: binpkg_index:parse_file/3
+# git reset --hard on refresh-portage-ng restores the upstream grouping,
+# so a cloud `deploy-host.sh --bootstrap` / `--refresh-portage-ng` would
+# hit the same failure on every fresh VM. Move the consult into
+# domain_modules, next to choicelog.pl, and drop the builder copy so it
+# is not loaded twice.
+#
+# Idempotent. If upstream already loads it before builder_modules, only
+# a leftover builder copy is removed. If the consult disappeared, warn
+# and continue — the predicate may have moved into a module we already
+# load. Refuse to guess when builder_modules or the choicelog anchor is
+# gone; kb sync would fail opaquely a minute later.
+_patch_portage_ng_loader() {
+  local loader="$BASELINE_DIR$CHROOT_PORTAGE_NG/Source/loader.pl"
+  if [[ ! -f "$loader" ]]; then
+    log_warn "no Source/loader.pl in baseline; skipping binpkg_index loader patch"
+    return 0
+  fi
+  command -v python3 >/dev/null 2>&1 || die "python3 not found; cannot patch Source/loader.pl"
+
+  local rc=0
+  python3 - "$loader" <<'PY' || rc=$?
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+marker = "loader:group(builder_modules"
+if marker not in text:
+    sys.exit(2)
+head, tail = text.split(marker, 1)
+pat = re.compile(
+    r"^[ \t]*portage\('Source/Domain/Gentoo/Binpkg/binpkg_index\.pl'\),[ \t]*\n",
+    re.M,
+)
+if "Binpkg/binpkg_index.pl" in head:
+    tail2, n = pat.subn("", tail, count=1)
+    if n:
+        open(path, "w").write(head + marker + tail2)
+        sys.exit(0)
+    sys.exit(10)
+m = pat.search(tail)
+if not m:
+    sys.exit(3)
+anchor = re.compile(
+    r"^[ \t]*\[?portage\('Source/Application/Performance/choicelog\.pl'\),[ \t]*\n",
+    re.M,
+)
+am = anchor.search(head)
+if not am:
+    sys.exit(4)
+line = m.group(0)
+tail2 = tail[:m.start()] + tail[m.end():]
+open(path, "w").write(head[:am.end()] + line + head[am.end():] + marker + tail2)
+sys.exit(0)
+PY
+  case "$rc" in
+    0)  log_info "  loader.pl: binpkg_index.pl loads with domain_modules" ;;
+    10) log_info "  loader.pl: binpkg_index.pl already in domain_modules" ;;
+    3)  log_warn "  loader.pl: binpkg_index.pl consult not in builder_modules; left unchanged" ;;
+    2)  die "Source/loader.pl has no builder_modules group; cannot place binpkg_index.pl" ;;
+    4)  die "Source/loader.pl domain_modules has no choicelog.pl anchor; cannot place binpkg_index.pl" ;;
+    *)  die "binpkg_index loader patch failed (rc=$rc)" ;;
+  esac
+}
+
 bootstrap_install_kb_qlf() {
   log_info "generating kb.qlf via portage-ng-dev --sync"
   log_info "(temporarily mounting tree rw so prolog-side git pull can run)"
@@ -1953,8 +2028,9 @@ cmd_refresh_portage_ng() {
   # files, so the gitignored, baseline-internal Knowledge artefacts (kb.qlf,
   # embeddings.pl, phase_stats.pl, ...), Source/{Certificates,Private}/ and
   # the per-host world *.local files survive untouched -- no rsync excludes
-  # needed. Source/Config/<host>.pl IS tracked and gets reset; we re-apply the
-  # tinderbox-ng policy overrides right after via _patch_portage_ng_host_config.
+  # needed. Source/Config/<host>.pl and Source/loader.pl ARE tracked and get
+  # reset; we re-apply the tinderbox-ng policy overrides right after via
+  # _patch_portage_ng_host_config and _patch_portage_ng_loader.
   log_info "git fetch + reset --hard origin/$PORTAGE_NG_REF inside baseline ($PORTAGE_NG_URL)"
   in_baseline_chroot bash -e <<EOF
 . /etc/profile
@@ -1983,8 +2059,11 @@ EOF
 
   # The git reset --hard above restores the upstream Source/Config/<host>.pl,
   # dropping any tinderbox-ng-owned policy overrides (notably
-  # config:binpkg_refresh(mtime), required for the matrix runner). Re-apply.
+  # config:binpkg_refresh(mtime), required for the matrix runner) and
+  # Source/loader.pl (binpkg_index.pl must load with domain_modules or
+  # the next refresh-kb dies on parse_file/3). Re-apply both.
   _patch_portage_ng_host_config
+  _patch_portage_ng_loader
 
   log_ok "portage-ng refreshed in baseline; new sessions will pick it up"
   log_warn "existing sessions still see the OLD portage-ng until reset"
@@ -3029,6 +3108,26 @@ _compare_summarize() {
     em_status="INFRA(overlay-inode-flicker)"
   fi
 
+  # Reclassify disk-full as INFRA(ENOSPC). Compare workdirs live on the
+  # shared sessions tmpfs (plus wget into shared distfiles); when that
+  # cap fills, ld/rustc/wget die with "No space left on device" while
+  # the 2T root still has hundreds of GiB free. Not a resolver miss.
+  # Helper also scans salvaged build-logs/*.gz (the in-flight CPV that
+  # actually hit ENOSPC is often not the compare target).
+  local _enospc_helper="${TINDERBOX_ENOSPC_RECLASSIFIER:-$LIBEXEC_DIR/reclassify-enospc.py}"
+  if [[ -f "$_enospc_helper" && -d "$logdir" ]]; then
+    local _enospc_kv=""
+    _enospc_kv="$(python3 "$_enospc_helper" --check "$logdir" 2>/dev/null)" || _enospc_kv=""
+    case "$pn_status" in
+      OK|OK\(*|RESTRICT\(*|INFRA\(*) ;;
+      *) [[ "$_enospc_kv" == *pn=1* ]] && pn_status="INFRA(ENOSPC)" ;;
+    esac
+    case "$em_status" in
+      OK|OK\(*|RESTRICT\(*|INFRA\(*) ;;
+      *) [[ "$_enospc_kv" == *em=1* ]] && em_status="INFRA(ENOSPC)" ;;
+    esac
+  fi
+
   # portage-ng renders with ANSI color codes, so we strip them before matching.
   # ESC[...m sequences appear around numbers in lines like "Total: \e[32m16\e[00m completed."
   local _strip='s/\x1b\[[0-9;]*[a-zA-Z]//g'
@@ -3916,8 +4015,12 @@ _progress_render_frame() {
   #   ok / ok       both engines built the target successfully
   #   ok / fail     PN-only win (PN succeeded where emerge failed)
   #   fail / ok     PN-only loss / regression (PN failed where emerge succeeded)
-  #   fail / fail   both engines failed (usually environmental: no network,
-  #                 missing system service, package legitimately broken)
+  #   fail / fail   both engines failed (package or profile, not infra)
+  #   ENOSPC        either side tagged INFRA(ENOSPC) (sessions tmpfs /
+  #                 distfiles full). Split out of fail/* so a disk-full
+  #                 wave does not look like resolver regressions.
+  #   infra         RESTRICT(*) / other INFRA(*) (manual fetch, overlay
+  #                 inode flicker, …) — also excluded from fail/*
   #   vdb mismatch     both ok but vdb_delta != "=" (raw upper-VDB *count*;
   #                    inflated when PN installs BDEPEND that emerge skips
   #                    on the binpkg path)
@@ -3939,8 +4042,12 @@ _progress_render_frame() {
         total++
         pn=$3; em=$4; vdb=$11
         is_ok_pn = (pn == "OK" || pn ~ /^OK\(/ )
-        is_ok_em = (em == "OK")
-        if      (is_ok_pn && is_ok_em)  { okok++;     if (vdb != "=") vdb_mismatch++ }
+        is_ok_em = (em == "OK" || em ~ /^OK\(/ )
+        is_enospc = (pn ~ /ENOSPC/ || em ~ /ENOSPC/)
+        is_infra  = (pn ~ /^(RESTRICT|INFRA)/ || em ~ /^(RESTRICT|INFRA)/)
+        if      (is_enospc)             { enospc++ }
+        else if (is_infra)              { infra++ }
+        else if (is_ok_pn && is_ok_em)  { okok++;     if (vdb != "=") vdb_mismatch++ }
         else if (is_ok_pn && !is_ok_em) { okfail++ }
         else if (!is_ok_pn && is_ok_em) { failok++ }
         else                            { failfail++ }
@@ -3964,12 +4071,20 @@ _progress_render_frame() {
         okfail_pct    = (total > 0)               ? 100.0 * okfail    / total : 0
         failok_pct    = (total > 0)               ? 100.0 * failok    / total : 0
         failfail_pct  = (total > 0)               ? 100.0 * failfail  / total : 0
+        enospc_pct    = (total > 0)               ? 100.0 * enospc    / total : 0
+        infra_pct     = (total > 0)               ? 100.0 * infra     / total : 0
         vdb_mm_pct    = (okok > 0)                ? 100.0 * vdb_mismatch / okok : 0
         printf "  Total:         %6d  packages compared\n", total
         printf "  %sok / ok%s        %6d  (%5.1f%%)   matched success\n",        G, N, okok,         okok_pct
         printf "  %sok / fail%s      %6d  (%5.1f%%)   PN-only wins (PN ok, emerge fail)\n", C, N, okfail,       okfail_pct
         printf "  %sfail / ok%s      %6d  (%5.1f%%)   regressions (PN fail, emerge ok)\n", R, N, failok,       failok_pct
-        printf "  %sfail / fail%s    %6d  (%5.1f%%)   both failed (environmental)\n",      Y, N, failfail,     failfail_pct
+        printf "  %sfail / fail%s    %6d  (%5.1f%%)   both failed (package / profile)\n",  Y, N, failfail,     failfail_pct
+        if (enospc > 0) {
+          printf "  %sENOSPC%s         %6d  (%5.1f%%)   sessions tmpfs / distfiles full\n", Y, N, enospc, enospc_pct
+        }
+        if (infra > 0) {
+          printf "  %sinfra%s          %6d  (%5.1f%%)   RESTRICT / other INFRA\n", Y, N, infra, infra_pct
+        }
         if (vdb_mismatch > 0) {
           printf "  %svdb count Δ%s    %6d  (%5.1f%% of ok/ok)   raw upper-VDB count (incl. PN BDEPEND)\n", C, N, vdb_mismatch, vdb_mm_pct
         }
@@ -4135,6 +4250,7 @@ _progress_render_frame() {
       BEGIN { G="\033[32m"; R="\033[31m"; Y="\033[33m"; D="\033[2m"; N="\033[0m"; PAD="          " }
       function sym(s,    label,col,vis) {
         if      (s == "OK" || s ~ /^OK\(/ )     { label="ok";   col=G }
+        else if (s ~ /ENOSPC/)                  { label="enospc"; col=Y }
         else if (s ~ /^FAIL\(/ || s ~ /^KILLED/ || s == "TIMEOUT" ) { label="fail"; col=R }
         else if (s ~ /^(RESTRICT|INFRA)/ )     { label="infra"; col=Y }
         else if (s == "" || s == "?")          { label="?";    col=D }
@@ -4237,6 +4353,64 @@ PROGRESS_HELP
       case "$key" in q|Q|'') break ;; esac
     fi
   done
+}
+
+# =============================================================================
+# tinderbox-ng reclassify-enospc:
+# rewrite FAIL(*) → INFRA(ENOSPC) when compare logs show disk-full
+# =============================================================================
+#
+# Live compares tag INFRA(ENOSPC) in _compare_summarize. This subcommand
+# walks an already-written results.tsv (mid-run is fine) and applies the
+# same detector, plus a ±15s cluster for truncated FAIL(build) that died
+# with an explicit ENOSPC peer (sessions-tmpfs waves).
+
+cmd_reclassify_enospc() {
+  local pinned_run="" dry_run=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run)        pinned_run="$2"; shift 2 ;;
+      --run=*)      pinned_run="${1#--run=}"; shift ;;
+      --dry-run)    dry_run=1; shift ;;
+      -h|--help)
+        cat <<'ENOSPC_HELP'
+tinderbox-ng reclassify-enospc [--run DIR] [--dry-run]
+
+Rewrite results.tsv exit labels to INFRA(ENOSPC) when the compare
+logdir (or salvaged build-logs/*.gz) shows a disk-full death:
+No space left on device, ENOSPC, wget "Cannot write … (Success)",
+or rustc "os error 28".
+
+  --run DIR     Matrix run dir. Default: most-recent compare-matrix-*
+                under $REPORTS_DIR_DEFAULT.
+  --dry-run     Print how many labels would change; do not write.
+
+New compares are tagged at summarize time; this is the backfill for
+rows written before that reclassifier existed. Safe to re-run.
+ENOSPC_HELP
+        return 0 ;;
+      *) die "reclassify-enospc: unknown flag $1" ;;
+    esac
+  done
+
+  require_dirs
+  local helper="${TINDERBOX_ENOSPC_RECLASSIFIER:-$LIBEXEC_DIR/reclassify-enospc.py}"
+  [[ -f "$helper" ]] || die "ENOSPC reclassifier not found: $helper"
+  command -v python3 >/dev/null 2>&1 || die "python3 not found in PATH"
+
+  local run="$pinned_run"
+  if [[ -z "$run" ]]; then
+    local reports_dir="${REPORTS_DIR_DEFAULT:-$TINDERBOX_ROOT/reports}"
+    run="$(_progress_pick_run "$reports_dir")"
+    [[ -n "$run" ]] || die "no compare-matrix run found under $reports_dir; use --run"
+    log_info "auto-detected run: $(basename "$run")"
+  fi
+  [[ -d "$run" ]] || die "run dir not found: $run"
+  [[ -f "$run/results.tsv" ]] || die "results.tsv not found in $run"
+
+  local -a args=(--run "$run")
+  (( dry_run )) && args+=(--dry-run)
+  python3 "$helper" "${args[@]}"
 }
 
 # =============================================================================
@@ -5125,6 +5299,13 @@ Subcommands:
                            Default: most-recent compare-matrix run.
                            Alias: binpkg_adjusted.
 
+  reclassify-enospc [--run DIR] [--dry-run]
+                           Rewrite results.tsv FAIL(*) → INFRA(ENOSPC)
+                           when compare logs show disk-full (sessions
+                           tmpfs or distfiles). New compares are tagged
+                           at summarize time; this backfills older rows.
+                           Alias: reclassify_enospc.
+
   extract-timing [--run DIR | --logdir DIR | --src DIR | --session DIR]
                  [--out FILE] [--quiet]
                            Extract per-engine wall-clock timing from
@@ -5270,6 +5451,8 @@ main() {
     extract-timing) cmd_extract_timing "$@" ;;
     extract_timing) cmd_extract_timing "$@" ;;
     timing)         cmd_extract_timing "$@" ;;
+    reclassify-enospc) cmd_reclassify_enospc "$@" ;;
+    reclassify_enospc) cmd_reclassify_enospc "$@" ;;
     tmpfs-up)     cmd_tmpfs_up     "$@" ;;
     tmpfs_up)     cmd_tmpfs_up     "$@" ;;
     tmpfs-down)   cmd_tmpfs_down   "$@" ;;
