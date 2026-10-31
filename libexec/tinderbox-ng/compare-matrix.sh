@@ -26,9 +26,11 @@
 # `--jobs N` runs N package comparisons concurrently. Each comparison
 # itself spawns 2 sessions (portage-ng + emerge in parallel mount
 # namespaces), so the actual session count peaks at 2N. Heavy source
-# builds (webkit-gtk, firefox, rust, llvm, gcc, …) are additionally
-# capped by TINDERBOX_MATRIX_HEAVY_JOBS (default 2) so a leftover
-# exact-ebuild wave cannot fill every slot with multi-hour compiles.
+# builds (webkit-gtk, firefox, rust, llvm, gcc, dev-ada, …) are
+# additionally capped by TINDERBOX_MATRIX_HEAVY_JOBS (default 2) so a
+# leftover exact-ebuild wave cannot fill every slot with multi-hour
+# compiles. dev-ada is heavy because each target rebuilds gcc[ada]
+# into the sessions tmpfs; --jobs 16 of those exhausts the RAM cap.
 # portage-ng always runs `--mode standalone` (never ipc): parallel
 # matrix workers need session-isolated VDBs; issue #80 speedups
 # (mtime-gated binpkg refresh) apply automatically after
@@ -341,11 +343,12 @@ _run_one() {
   return "$mismatch"
 }
 
-# Multi-hour source builds. A leftover `=cat/pn-ver` wave can otherwise
-# schedule every webkit-gtk SLOT variant at once; each compile then
-# gets 2–3 cores and the 24h build timeout still loses. Override the
-# match list via TINDERBOX_MATRIX_HEAVY_REGEX (bash ERE against the
-# raw manifest atom). rust-common / rust-bin are *not* heavy.
+# Multi-hour source builds, plus anything that rebuilds one. A leftover
+# `=cat/pn-ver` wave can otherwise schedule every webkit-gtk SLOT
+# variant — or every dev-ada ebuild, each of which rebuilds gcc[ada]
+# into the sessions tmpfs — at once. Override the match list via
+# TINDERBOX_MATRIX_HEAVY_REGEX (bash ERE against the raw manifest
+# atom). rust-common / rust-bin are *not* heavy.
 _cm_is_heavy() {
   local re="${TINDERBOX_MATRIX_HEAVY_REGEX:-}"
   if [[ -n "$re" ]]; then
@@ -357,7 +360,7 @@ _cm_is_heavy() {
     *webkit-gtk*|*www-client/firefox*|*www-client/chromium* \
     |*www-client/qtwebengine*|*mail-client/thunderbird* \
     |*app-office/libreoffice*|*dev-lang/rust* \
-    |*llvm-core/llvm*|*llvm-core/clang*|*sys-devel/gcc*) return 0 ;;
+    |*llvm-core/llvm*|*llvm-core/clang*|*sys-devel/gcc*|*dev-ada/*) return 0 ;;
     *) return 1 ;;
   esac
 }

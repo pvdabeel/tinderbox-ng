@@ -824,7 +824,13 @@ Heavy atoms:
 (not rust\-common / rust\-bin),
 .IR llvm\-core/llvm ,
 .IR llvm\-core/clang ,
-.IR sys\-devel/gcc .
+.IR sys\-devel/gcc ,
+.IR dev\-ada/*
+(each target rebuilds
+.I sys\-devel/gcc[ada]
+into the sessions tmpfs, so a
+.B \-\-jobs 16
+wave of them exhausts that cap).
 .TP
 .B TINDERBOX_MDNS_HOSTS
 Space\-separated hostnames that must resolve from inside the chroot (the
